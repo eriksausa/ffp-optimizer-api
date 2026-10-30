@@ -70,7 +70,7 @@ def calculate_required_bank_points(
     award_miles_needed: int,
     base_ratio: float,
     bonus_pct: float = 0.0,
-    min_increment: int = 1,
+    min_increment: int = 1000,
 ) -> int:
     """
     Computes how many credit card points must be transferred to reach `award_miles_needed`,

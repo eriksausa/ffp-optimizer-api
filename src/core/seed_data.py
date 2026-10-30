@@ -115,7 +115,7 @@ LOYALTY_PROGRAMS: dict[str, LoyaltyProgram] = {
 
 TRANSFER_PARTNER_RULES: list[TransferPartnerRule] = [
     # Chase Ultimate Rewards
-    TransferPartnerRule("CHASE_UR", "IB_PLUS", base_ratio=1.0, active_bonus_pct=0.0, min_transfer_increment=1000),
+    TransferPartnerRule("CHASE_UR", "IB_PLUS", base_ratio=1.0, active_bonus_pct=30.0, min_transfer_increment=1000),
     TransferPartnerRule("CHASE_UR", "UA_MP", base_ratio=1.0, active_bonus_pct=0.0, min_transfer_increment=1000),
     TransferPartnerRule("CHASE_UR", "AC_AP", base_ratio=1.0, active_bonus_pct=20.0, min_transfer_increment=1000),
     # American Express Membership Rewards
