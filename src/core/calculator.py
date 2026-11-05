@@ -206,7 +206,7 @@ def estimate_eligible_spend(
             + (dest_airport.estimated_gov_departure_tax_usd * 0.35),
             2,
         )
-        est_gov_tax = min(est_gov_tax, round(total_ticket_price_usd * 0.50, 2))
+        est_gov_tax = min(est_gov_tax, round(total_ticket_price_usd * 0.35, 2))
         eligible = round(max(0.0, total_ticket_price_usd - est_gov_tax), 2)
         if not counts_yq_surcharge and yq_surcharge_usd > 0:
             eligible = round(max(0.0, eligible - yq_surcharge_usd), 2)

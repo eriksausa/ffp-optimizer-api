@@ -99,7 +99,7 @@ class TestCoreLoyaltyArbitrageEngine(unittest.TestCase):
         eligible_usd, gov_tax_usd = estimate_eligible_spend(
             mex, fra, base_fare_usd=None, yq_surcharge_usd=0.0, total_ticket_price_usd=2000.0, counts_yq_surcharge=True
         )
-        self.assertGreater(gov_tax_usd, 50.0)
+        self.assertGreater(gov_tax_usd, 80.0)
         self.assertEqual(eligible_usd, round(2000.0 - gov_tax_usd, 2))
 
         # EU261: MEX->FRA on LH (EU carrier arriving in EU > 3,500 km) -> €600
