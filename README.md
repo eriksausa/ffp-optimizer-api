@@ -2,7 +2,7 @@
 
 A modular Python backend and domain calculation engine that solves two interconnected airline loyalty optimization problems:
 
-1. **Credit Card Point Transfer & Partner Award Arbitrage**: Evaluates transferable bank currencies (**American Express Membership Rewards**, **Chase Ultimate Rewards**, **Citi ThankYou Points**, **Capital One Venture Miles**), active promotional transfer bonuses, and cross-alliance partner award charts (**Star Alliance**, **Oneworld**, **SkyTeam**) to identify the lowest-point pathway to book a target flight and cabin.
+1. **Credit Card Point Transfer & Partner Award Arbitrage**: Evaluates transferable bank currencies (**American Express Membership Rewards**, **Santander Unique Points**, **Puntos BBVA**), active promotional transfer bonuses, and cross-alliance partner award charts (**Star Alliance**, **Oneworld**, **SkyTeam**) to identify the lowest-point pathway to book a target flight and cabin.
 2. **Paid Flight Crediting & Status ROI ("Default to the Metal" vs. "Smart Alliance Switch")**: Simulates crediting paid flight segments across competing alliance programs, stripping mandatory government departure taxes (e.g., Mexico's TUA or UK APD) while retaining eligible Base Fare + Carrier-Imposed Surcharges (`YQ`/`YR`), calculating normalized percentage progress toward Alliance Gold/Sapphire/Elite Plus, unlocking tangible award benchmarks, and checking static **EU261** route protection (€250 / €400 / €600).
 
 ## Repository Architecture
