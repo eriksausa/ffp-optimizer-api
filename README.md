@@ -8,7 +8,7 @@ A modular Python backend and domain calculation engine that solves two interconn
 ## Repository Architecture
 
 ```text
-loyalty-arbitrage-engine/
+ffp-optimizer-api/
 ├── README.md                  # System architecture, math/routing overview, and active development roadmap
 ├── requirements.txt           # Core dependencies + pinned stack (fastapi, sqlalchemy, pydantic, mangum, pytest)
 ├── .gitignore                 # Standard Python/env ignores
