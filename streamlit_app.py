@@ -491,7 +491,7 @@ def _run_paid_flight_simulation(
 # Streamlit Page Setup & Header
 # ===========================================================================
 st.set_page_config(
-    page_title="Loyalty Arbitrage & Frequent Flyer ROI Engine — Erik Šauša",
+    page_title="AeroSwitch— Erik Šauša",
     page_icon="✈️",
     layout="wide",
 )
@@ -508,14 +508,14 @@ is_es = lang == "ES"
 
 with hdr_left:
     if not is_es:
-        st.title("✈️ Cross-Alliance Loyalty Arbitrage & Frequent Flyer ROI Engine")
+        st.title("✈️ Flight-to-Reward Calculator — Turn your upcoming flights into free trips and lounge status")
         st.markdown(
             "**Created by Erik Šauša, Dipl.-Ing. (M.Sc.), B.Sc.**  \n"
             "*Master of Science in Telecommunications · Bachelor of Science in Electrical Engineering and Information Technology (TU Wien)*  \n"
             "🚧 **Interactive Architecture Demo (Work in Progress):** *Phase 1 Core Math Engine Active · Phase 2 FastAPI / PostgreSQL / AWS Lambda Scaffolded*"
         )
     else:
-        st.title("✈️ Motor de Arbitraje de Lealtad Multi-Alianza y ROI de Viajero Frecuente")
+        st.title("✈️ Tu Calculadora de Vuelos Gratis — Convierte tus vuelos en tu próximo viaje y acceso a salones VIP.")
         st.markdown(
             "**Creado por Erik Šauša, Dipl.-Ing. (M.Sc.), B.Sc.**  \n"
             "*Maestría en Ciencias en Telecomunicaciones · Licenciatura en Ingeniería Eléctrica y Tecnologías de la Información (TU Wien)*  \n"
