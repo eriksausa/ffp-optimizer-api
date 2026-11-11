@@ -3,9 +3,11 @@ Pure-Python Calculation & Arbitrage Engine (`src/core/calculator.py`).
 
 Implements:
 1. Credit card transfer bonus & effective Cents-Per-Mile (CPM) arbitrage math.
-2. Cross-alliance partner award discovery (finding the cheapest bank point pathway for a route).
+2. Cross-alliance partner award discovery (with optional live bonus & cash fare overrides).
 3. Geodesic Haversine distance (`mi` & `km`), government departure tax stripping, and static EU261 bands.
-4. Multi-program flight crediting simulation ("Default to the Metal" vs. "Smart Alliance Switch").
+4. Multi-program flight crediting simulation ("Default to the Metal" vs. "Smart Alliance Switch"),
+   explicitly preserving 0%-earning fare-class traps (e.g., Lufthansa 'P' class on Turkish Miles&Smiles)
+   so users see the warning rather than having the row silently dropped.
 """
 
 import math
@@ -93,7 +95,6 @@ def calculate_effective_cpm(
     """
     Computes the realized Cents-Per-Mile / Cents-Per-Point (CPM/CPP) on a specific redemption:
         ((cash_fare_usd - taxes_and_yq_usd) * 100) / points_or_miles_used
-    Used strictly to compare real-world route redemptions against a bank's cash-out baseline.
     """
     if points_or_miles_used <= 0:
         raise ValueError("points_or_miles_used must be strictly positive.")
@@ -106,6 +107,8 @@ def find_best_transfer_pathways(
     destination_iata: str,
     cabin: CabinClass = CabinClass.BUSINESS,
     bank_code_filter: Optional[str] = None,
+    override_bonus_pct: Optional[float] = None,
+    override_cash_fare_usd: Optional[float] = None,
 ) -> list[TransferOptionResult]:
     """
     Evaluates all seeded `AwardSweetSpot` benchmarks for `(origin_iata, destination_iata, cabin)`
@@ -124,6 +127,12 @@ def find_best_transfer_pathways(
     results: list[TransferOptionResult] = []
     for spot in matching_awards:
         program = LOYALTY_PROGRAMS[spot.booking_program_code]
+        cash_benchmark = (
+            float(override_cash_fare_usd)
+            if override_cash_fare_usd is not None and override_cash_fare_usd > 0
+            else spot.typical_cash_fare_one_way_usd
+        )
+
         for rule in TRANSFER_PARTNER_RULES:
             if rule.program_code != spot.booking_program_code:
                 continue
@@ -131,23 +140,28 @@ def find_best_transfer_pathways(
                 continue
 
             bank = BANK_CURRENCIES[rule.bank_code]
-            eff_ratio = apply_transfer_bonus(rule.base_ratio, rule.active_bonus_pct)
+            effective_bonus = (
+                float(override_bonus_pct)
+                if override_bonus_pct is not None
+                else rule.active_bonus_pct
+            )
+            eff_ratio = apply_transfer_bonus(rule.base_ratio, effective_bonus)
             bank_pts = calculate_required_bank_points(
                 spot.miles_required_one_way,
                 rule.base_ratio,
-                rule.active_bonus_pct,
+                effective_bonus,
                 rule.min_transfer_increment,
             )
             cpp = calculate_effective_cpm(
-                spot.typical_cash_fare_one_way_usd,
+                cash_benchmark,
                 spot.taxes_and_yq_usd,
                 bank_pts,
             )
-            net_saved = round(max(0.0, spot.typical_cash_fare_one_way_usd - spot.taxes_and_yq_usd), 2)
+            net_saved = round(max(0.0, cash_benchmark - spot.taxes_and_yq_usd), 2)
 
             bonus_label = (
-                f"Includes {rule.active_bonus_pct:.0f}% transfer bonus ({eff_ratio}:1)."
-                if rule.active_bonus_pct > 0
+                f"Includes {effective_bonus:.0f}% transfer bonus ({eff_ratio}:1)."
+                if effective_bonus > 0
                 else f"Standard transfer ratio ({eff_ratio}:1)."
             )
 
@@ -164,7 +178,7 @@ def find_best_transfer_pathways(
                     effective_transfer_ratio=eff_ratio,
                     bank_points_required=bank_pts,
                     taxes_and_yq_usd=spot.taxes_and_yq_usd,
-                    cash_fare_benchmark_usd=spot.typical_cash_fare_one_way_usd,
+                    cash_fare_benchmark_usd=cash_benchmark,
                     net_cash_saved_usd=net_saved,
                     effective_cents_per_point=cpp,
                     beats_cashout_baseline=(cpp > bank.baseline_cashout_cents_per_point),
@@ -172,7 +186,6 @@ def find_best_transfer_pathways(
                 )
             )
 
-    # Sort primarily by lowest bank_points_required, then by lowest taxes_and_yq_usd
     results.sort(key=lambda r: (r.bank_points_required, r.taxes_and_yq_usd))
     return results
 
@@ -196,7 +209,7 @@ def estimate_eligible_spend(
         gov_taxes = (
             round(max(0.0, total_ticket_price_usd - base_fare_usd - yq_surcharge_usd), 2)
             if total_ticket_price_usd is not None
-            else 0.0
+            else round(origin_airport.estimated_gov_departure_tax_usd + (dest_airport.estimated_gov_departure_tax_usd * 0.35), 2)
         )
         return eligible, gov_taxes
 
@@ -252,8 +265,9 @@ def evaluate_eu261_segment(
 
 def simulate_flight_crediting(segments: list[FlightSegment]) -> list[CreditingSimulationResult]:
     """
-    Simulates crediting a list of paid flight segments across all seeded loyalty programs,
-    comparing 'Default to the Metal' against partner 'Smart Alliance Switch' programs.
+    Simulates crediting a list of paid flight segments across all loyalty programs in the
+    operating carrier's alliance, comparing 'Default to the Metal' against partner
+    'Smart Alliance Switch' programs.
     """
     if not segments:
         raise ValueError("At least one FlightSegment is required.")
@@ -270,6 +284,8 @@ def simulate_flight_crediting(segments: list[FlightSegment]) -> list[CreditingSi
         total_gov_taxes = 0.0
         used_rev = False
         used_dist = False
+        matched_any_rule = False
+        zero_earning_trap_classes: list[str] = []
 
         for seg in segments:
             orig = AIRPORTS[seg.origin_iata.upper()]
@@ -289,6 +305,10 @@ def simulate_flight_crediting(segments: list[FlightSegment]) -> list[CreditingSi
             )
             if rule is None:
                 continue
+
+            matched_any_rule = True
+            if rule.award_miles_pct == 0.0 and rule.status_miles_pct == 0.0:
+                zero_earning_trap_classes.append(f"{seg.operating_carrier.upper()} '{seg.booking_class.upper()}'")
 
             eligible_spend, gov_tax = estimate_eligible_spend(
                 orig,
@@ -334,17 +354,20 @@ def simulate_flight_crediting(segments: list[FlightSegment]) -> list[CreditingSi
                 own_metal_status_pts += seg_status
                 own_metal_segs += 1
 
-        if total_miles == 0 and total_status_pts == 0.0:
+        if not matched_any_rule:
             continue
 
         progress_pct = round(min(100.0, (total_status_pts / program.gold_status_threshold) * 100.0), 1)
         warning: Optional[str] = None
-        if program.own_metal_min_share_pct > 0 and total_status_pts > 0:
+        if zero_earning_trap_classes:
+            trap_str = ", ".join(sorted(set(zero_earning_trap_classes)))
+            warning = f"⚠️ 0% Earning Trap: {trap_str} earns 0 miles and 0 status points in {program.program_name}!"
+        elif program.own_metal_min_share_pct > 0 and total_status_pts > 0:
             share = (own_metal_status_pts / total_status_pts) * 100.0
             if share < program.own_metal_min_share_pct:
                 warning = f"Requires {program.own_metal_min_share_pct:.0f}% status points on {program.home_carrier_iata} Group metal (currently {share:.1f}%)."
         elif program.own_metal_min_segments > 0 and own_metal_segs < program.own_metal_min_segments:
-            warning = f"Requires {program.own_metal_min_segments} annual segments on {program.home_carrier_iata} metal (currently {own_metal_segs})."
+            warning = f"Requires {program.own_metal_min_segments} annual segments on {program.home_carrier_iata} metal (this itinerary has {own_metal_segs})."
 
         short_unlocks: list[str] = []
         long_progress: list[str] = []
