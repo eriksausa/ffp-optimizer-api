@@ -579,6 +579,7 @@ with st.sidebar:
             **Erik Šauša, Dipl.-Ing. (M.Sc.), B.Sc.**
             - 🎓 **Master of Science in Telecommunications** *(TU Wien)*
             - 🎓 **Bachelor of Science in Electrical Engineering and Information Technology** *(TU Wien)*
+            - 💼 **Data Scientist & ML Engineer** 
             """
         )
         st.divider()
@@ -615,7 +616,7 @@ with st.sidebar:
             **Erik Šauša, Dipl.-Ing. (M.Sc.), B.Sc.**
             - 🎓 **Maestría en Ciencias en Telecomunicaciones** *(TU Wien)*
             - 🎓 **Licenciatura en Ingeniería Eléctrica y Tecnologías de la Información** *(TU Wien)*
-            """
+            - 💼 **Científico de Datos & Ingeniero de ML** """
         )
         st.divider()
         st.markdown("### 🇲🇽 Alcance Verificado")
