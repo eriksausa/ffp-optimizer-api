@@ -1,4 +1,4 @@
-# Loyalty Arbitrage Engine (`loyalty-arbitrage-engine`)
+# FFP-optimizer-api
 
 A modular Python backend and domain calculation engine that solves two interconnected airline loyalty optimization problems:
 
