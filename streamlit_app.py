@@ -1069,10 +1069,10 @@ with tab3:
     sp1, sp2, sp3 = st.columns(3)
     with sp1:
         spend_mode = st.selectbox(
-            "5. Fare & Mexican TUA Input Mode" if not is_es else "5. Modo de Precio e Impuesto TUA",
+            "5. Fare & Government Tax Input Mode" if not is_es else "5. Modo de Precio e Impuestos Gubernamentales",
             options=["ALL_IN_AUTO_STRIP", "EXACT_BASE_AND_YQ"],
             format_func=lambda m: (
-                ("All-In Price (Auto-Strip MEX TUA & Airport Gov Taxes)" if not is_es else "Precio Total con Impuestos (Descontar TUA Automáticamente)")
+                ("All-In Price (Auto-Strip Airport & Gov Taxes)" if not is_es else "Precio Total con Impuestos (Descontar Impuestos Aeroportuarios y Gubernamentales)")
                 if m == "ALL_IN_AUTO_STRIP"
                 else ("Exact Base Fare + YQ Surcharge Breakdown" if not is_es else "Tarifa Base Exacta + Cargo por Combustible YQ")
             ),
@@ -1112,17 +1112,31 @@ with tab3:
             _, est_tax_preview = estimate_eligible_spend(
                 orig_ap_preview, dest_ap_preview, None, 0.0, float(seg_all_in_usd), True
             )
-            if not is_es:
+            is_mexican_departure = orig_ap_preview.country_code == "MX"
+            if not is_es and is_mexican_departure:
                 st.info(
                     f"🧾 **Mexican TUA & Gov Tax Stripper (`{orig_c} → {dest_c}`):** Strips **~${est_tax_preview:.2f} USD "
                     f"(~${est_tax_preview * MXN_PER_USD:,.0f} MXN)** in mandatory government taxes per leg (`{orig_c}` TUA/tax "
                     f"${orig_ap_preview.estimated_gov_departure_tax_usd:.0f} USD + `{dest_c}` duty) so only eligible `Base Fare + YQ` earns revenue miles."
                 )
-            else:
+            elif is_es and is_mexican_departure:
                 st.info(
                     f"🧾 **Desglose Automático de TUA (`{orig_c} → {dest_c}`):** Descuenta **~${est_tax_preview:.2f} USD "
                     f"(~${est_tax_preview * MXN_PER_USD:,.0f} MXN)** de impuestos gubernamentales por tramo (`{orig_c}` TUA "
                     f"${orig_ap_preview.estimated_gov_departure_tax_usd:.0f} USD + tasas de `{dest_c}`) para calcular millas solo sobre `Tarifa Base + YQ`."
+                )
+            elif not is_es:
+                st.info(
+                    f"🧾 **Estimated Airport & Gov Tax Stripper (`{orig_c} → {dest_c}`):** Strips **~${est_tax_preview:.2f} USD** "
+                    f"in estimated mandatory taxes per leg (`{orig_c}` estimated departure tax "
+                    f"${orig_ap_preview.estimated_gov_departure_tax_usd:.0f} USD + `{dest_c}` airport tax) so only eligible `Base Fare + YQ` earns revenue miles."
+                )
+            else:
+                st.info(
+                    f"🧾 **Desglose Estimado de Impuestos Aeroportuarios y Gubernamentales (`{orig_c} → {dest_c}`):** "
+                    f"Descuenta **~${est_tax_preview:.2f} USD** en impuestos obligatorios estimados por tramo "
+                    f"(impuesto de salida estimado de `{orig_c}`: ${orig_ap_preview.estimated_gov_departure_tax_usd:.0f} USD "
+                    f"+ impuesto aeroportuario de `{dest_c}`) para calcular millas solo sobre `Tarifa Base + YQ`."
                 )
 
     ticketing_code = op_carrier if ticket_stock_mode == "OWN_TICKET_STOCK" else "XX"
@@ -1172,7 +1186,13 @@ with tab3:
     m_col2.metric(
         "Eligible Spend (Base + YQ)" if not is_es else "Gasto Elegible (Base + YQ)",
         f"${sample_prog.eligible_spend_usd:,.2f} USD",
-        (f"TUA & Taxes Stripped: ${sample_prog.estimated_gov_taxes_stripped_usd:,.2f}" if not is_es else f"TUA e Impuestos Descontados: ${sample_prog.estimated_gov_taxes_stripped_usd:,.2f}"),
+        (
+            f"{'TUA & Taxes' if ap_orig.country_code == 'MX' else 'Gov. Taxes'} Stripped: "
+            f"${sample_prog.estimated_gov_taxes_stripped_usd:,.2f}"
+            if not is_es
+            else f"{'TUA e Impuestos' if ap_orig.country_code == 'MX' else 'Impuestos Gub.'} Descontados: "
+            f"${sample_prog.estimated_gov_taxes_stripped_usd:,.2f}"
+        ),
     )
     m_col3.metric(
         (f"Outbound EU261 ({orig_c}→{dest_c})" if not is_es else f"EU261 Ida ({orig_c}→{dest_c})"),
@@ -1201,11 +1221,28 @@ with tab3:
     if metal_res and top_partner:
         miles_delta = top_partner.redeemable_miles_earned - metal_res.redeemable_miles_earned
         status_delta = round(top_partner.progress_to_gold_pct - metal_res.progress_to_gold_pct, 1)
+        route_airports = {orig_c, dest_c}
+        show_ib_latam_avios_note = (
+            metal_res.program_code == "IB_PLUS"
+            and op_carrier == "IB"
+            and "MAD" in route_airports
+            and bool({"MEX", "CUN"} & route_airports)
+        )
+        ib_latam_avios_note_en = (
+            "(on `IB` Spain–Mexico flights, both **Iberia Club** and **British Airways Club** credit by spend at **7 Avios per €1 EUR** = 5 base + 2 LatAm bonus) "
+            if show_ib_latam_avios_note
+            else ""
+        )
+        ib_latam_avios_note_es = (
+            "(en vuelos `IB` España–México, tanto **Iberia Club** como **British Airways Club** acreditan por gasto a razón de **7 Avios por cada €1 EUR** = 5 base + 2 bono LatAm) "
+            if show_ib_latam_avios_note
+            else ""
+        )
         if not is_es:
             st.success(
                 f"🔀 **Own Metal (`{metal_res.program_name}`) vs. Distance-Based Alliance Partner (`{top_partner.program_name}`):**  \n"
                 f"• **Crediting to Operating Airline ({metal_res.program_name} — `{metal_res.calculation_basis}`):** Earns **{metal_res.redeemable_miles_earned:,}** points "
-                f"(on `IB` Spain–Mexico flights, both **Iberia Club** and **British Airways Club** credit by spend at **7 Avios per €1 EUR** = 5 base + 2 LatAm bonus) "
+                f"{ib_latam_avios_note_en}"
                 f"and reaches **{metal_res.progress_to_gold_pct}%** toward Gold/Sapphire status.  \n"
                 f"• **Smart Partner Switch ({top_partner.program_name} — `{top_partner.calculation_basis}`):** Earns **{top_partner.redeemable_miles_earned:,}** points ({miles_delta:+,} vs. metal), "
                 f"reaches **{top_partner.progress_to_gold_pct}%** toward Gold/Sapphire ({status_delta:+.1f}% status difference), and unlocks: "
@@ -1215,7 +1252,7 @@ with tab3:
             st.success(
                 f"🔀 **Propia Aerolínea (`{metal_res.program_name}`) vs. Socio de Alianza por Distancia (`{top_partner.program_name}`):**  \n"
                 f"• **Propia Aerolínea ({metal_res.program_name} — `{metal_res.calculation_basis}`):** Acumula **{metal_res.redeemable_miles_earned:,}** puntos "
-                f"(en vuelos `IB` España–México, tanto **Iberia Club** como **British Airways Club** acreditan por gasto a razón de **7 Avios por cada €1 EUR** = 5 base + 2 bono LatAm) "
+                f"{ib_latam_avios_note_es}"
                 f"y alcanza **{metal_res.progress_to_gold_pct}%** hacia estatus Oro/Sapphire.  \n"
                 f"• **Socio por Distancia ({top_partner.program_name} — `{top_partner.calculation_basis}`):** Acumula **{top_partner.redeemable_miles_earned:,}** puntos ({miles_delta:+,} vs. propia aerolínea), "
                 f"alcanza **{top_partner.progress_to_gold_pct}%** hacia estatus Oro/Sapphire ({status_delta:+.1f}% dif. en estatus), y desbloquea: "
