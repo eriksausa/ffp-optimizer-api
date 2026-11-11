@@ -2,12 +2,14 @@
 Pure-Python Calculation & Arbitrage Engine (`src/core/calculator.py`).
 
 Implements:
-1. Credit card transfer bonus & effective Cents-Per-Mile (CPM) arbitrage math.
-2. Cross-alliance partner award discovery (with optional live bonus & cash fare overrides).
-3. Geodesic Haversine distance (`mi` & `km`), government departure tax stripping, and static EU261 bands.
-4. Multi-program flight crediting simulation ("Default to the Metal" vs. "Smart Alliance Switch"),
-   explicitly preserving 0%-earning fare-class traps (e.g., Lufthansa 'P' class on Turkish Miles&Smiles)
-   so users see the warning rather than having the row silently dropped.
+1. Credit card transfer bonus & effective Cents-Per-Mile (CPM) arbitrage math for
+   Santander Unique Rewards (1:1 to Iberia), BBVA México (2.6:1 to Iberia, 1.6:1 to Aeroméxico),
+   and American Express México (1:1 to Iberia, British Airways, Flying Blue, Aeroméxico).
+2. Geodesic Haversine distance (`mi` & `km`), per-origin airport departure tax stripping
+   (Mexican TUA applied strictly when departing `MEX`/`CUN`; European airport tax when departing `CDG`/`MAD`),
+   and static EU261 bands (€250, €400, €600).
+3. Multi-program flight crediting simulation for `CDG <-> MEX` on Aeroméxico (SkyTeam)
+   and `MEX <-> MAD` on Iberia (Oneworld).
 """
 
 import math
@@ -32,8 +34,7 @@ from src.core.seed_data import (
 
 EARTH_RADIUS_KM = 6371.0088
 KM_TO_MILES = 0.6213711922
-EU_EEA_CH_CARRIERS = {"LH", "LX", "OS", "SN", "IB", "AF", "KL", "AY", "SK", "TP", "LO"}
-UA_PREFERRED_PARTNERS = {"LH", "LX", "OS", "SN", "AC", "NH"}
+EU_EEA_CH_CARRIERS = {"IB", "AF", "KL", "LH", "LX", "OS", "SN", "AY", "SK", "TP", "LO"}
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> tuple[float, float]:
@@ -59,7 +60,7 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> tu
 def apply_transfer_bonus(base_ratio: float, bonus_pct: float) -> float:
     """
     Calculates the effective transfer multiplier from bank points to airline miles.
-    Example: base_ratio=1.0 with bonus_pct=30.0 -> 1.30 airline miles per 1 bank point.
+    Example: base_ratio=1.0 with bonus_pct=20.0 -> 1.20 airline miles per 1 bank point.
     """
     if base_ratio <= 0:
         raise ValueError("base_ratio must be strictly positive.")
@@ -76,12 +77,12 @@ def calculate_required_bank_points(
 ) -> int:
     """
     Computes how many credit card points must be transferred to reach `award_miles_needed`,
-    rounding up to the bank's required transfer increment (typically 1,000 points).
+    rounding up to the bank's required transfer increment (1,000 pts for Santander/Amex, 130 pts for BBVA->Avios).
     """
     if award_miles_needed <= 0:
         return 0
-    effective_ratio = apply_transfer_bonus(base_ratio, bonus_pct)
-    raw_points = award_miles_needed / effective_ratio
+    effective_ratio = base_ratio * (1.0 + (bonus_pct / 100.0))
+    raw_points = round(award_miles_needed / effective_ratio, 6)
     if min_increment <= 1:
         return math.ceil(raw_points)
     return int(math.ceil(raw_points / min_increment) * min_increment)
@@ -93,7 +94,7 @@ def calculate_effective_cpm(
     points_or_miles_used: int,
 ) -> float:
     """
-    Computes the realized Cents-Per-Mile / Cents-Per-Point (CPM/CPP) on a specific redemption:
+    Computes realized Cents-Per-Point (CPP in USD cents) on a specific redemption:
         ((cash_fare_usd - taxes_and_yq_usd) * 100) / points_or_miles_used
     """
     if points_or_miles_used <= 0:
@@ -105,15 +106,14 @@ def calculate_effective_cpm(
 def find_best_transfer_pathways(
     origin_iata: str,
     destination_iata: str,
-    cabin: CabinClass = CabinClass.BUSINESS,
+    cabin: CabinClass = CabinClass.ECONOMY,
     bank_code_filter: Optional[str] = None,
     override_bonus_pct: Optional[float] = None,
     override_cash_fare_usd: Optional[float] = None,
 ) -> list[TransferOptionResult]:
     """
     Evaluates all seeded `AwardSweetSpot` benchmarks for `(origin_iata, destination_iata, cabin)`
-    and joins them against `TRANSFER_PARTNER_RULES` to rank which bank point transfer requires
-    the fewest credit card points and yields the highest net cash savings.
+    and joins them against verified `TRANSFER_PARTNER_RULES` (Santander Unique, BBVA, Amex México).
     """
     orig = origin_iata.upper()
     dest = destination_iata.upper()
@@ -159,16 +159,23 @@ def find_best_transfer_pathways(
             )
             net_saved = round(max(0.0, cash_benchmark - spot.taxes_and_yq_usd), 2)
 
+            if rule.base_ratio < 0.45:
+                base_str = f"2.6 Puntos BBVA = 1 Avios (min {rule.min_transfer_increment} pts)"
+            elif rule.base_ratio == 0.625:
+                base_str = "1.6 Puntos BBVA = 1 Punto Aeroméxico"
+            else:
+                base_str = "1 : 1 Transfer Ratio"
+
             bonus_label = (
-                f"Includes {effective_bonus:.0f}% transfer bonus ({eff_ratio}:1)."
+                f"{base_str} + {effective_bonus:.0f}% bonus ({eff_ratio}:1)."
                 if effective_bonus > 0
-                else f"Standard transfer ratio ({eff_ratio}:1)."
+                else f"{base_str}."
             )
 
             results.append(
                 TransferOptionResult(
                     bank_code=bank.bank_code,
-                    bank_currency_name=f"{bank.bank_name} {bank.currency_name}",
+                    bank_currency_name=f"{bank.bank_name} ({bank.currency_name})",
                     booking_program_code=program.program_code,
                     booking_program_name=program.program_name,
                     operating_carrier_iata=spot.operating_carrier_iata,
@@ -199,8 +206,11 @@ def estimate_eligible_spend(
     counts_yq_surcharge: bool,
 ) -> tuple[float, float]:
     """
-    Separates eligible loyalty spend (Base Fare + carrier-imposed YQ/YR) from mandatory
-    government/airport departure taxes (such as Mexico's TUA or UK APD).
+    Separates eligible loyalty spend (Base Fare + carrier-imposed YQ/YR) from the
+    departure airport's mandatory government tax:
+    - Departing MEX/CUN strips Mexican TUA (~$65 / ~$58 USD).
+    - Departing CDG strips French airport departure tax (~$75 USD).
+    - Departing MAD strips Spanish AENA departure tax (~$42 USD).
     Returns `(eligible_spend_usd, estimated_gov_taxes_stripped_usd)`.
     """
     if base_fare_usd is not None:
@@ -209,17 +219,16 @@ def estimate_eligible_spend(
         gov_taxes = (
             round(max(0.0, total_ticket_price_usd - base_fare_usd - yq_surcharge_usd), 2)
             if total_ticket_price_usd is not None
-            else round(origin_airport.estimated_gov_departure_tax_usd + (dest_airport.estimated_gov_departure_tax_usd * 0.35), 2)
+            else round(origin_airport.estimated_gov_departure_tax_usd, 2)
         )
         return eligible, gov_taxes
 
     if total_ticket_price_usd is not None and total_ticket_price_usd > 0:
-        est_gov_tax = round(
-            origin_airport.estimated_gov_departure_tax_usd
-            + (dest_airport.estimated_gov_departure_tax_usd * 0.35),
-            2,
+        # Strip strictly the departure airport's mandatory government tax
+        est_gov_tax = min(
+            round(origin_airport.estimated_gov_departure_tax_usd, 2),
+            round(total_ticket_price_usd * 0.35, 2),
         )
-        est_gov_tax = min(est_gov_tax, round(total_ticket_price_usd * 0.35, 2))
         eligible = round(max(0.0, total_ticket_price_usd - est_gov_tax), 2)
         if not counts_yq_surcharge and yq_surcharge_usd > 0:
             eligible = round(max(0.0, eligible - yq_surcharge_usd), 2)
@@ -234,7 +243,10 @@ def evaluate_eu261_segment(
     operating_carrier: str,
 ) -> dict[str, object]:
     """
-    Calculates static single-segment EU261 protection and compensation (€250, €400, or €600).
+    Calculates static single-segment EU261 protection and compensation (€250, €400, or €600):
+    - Departs an EU/EEA/CH airport (e.g. CDG->MEX on AM, or MAD->MEX on IB) -> Covered (€600).
+    - Arrives into an EU/EEA/CH airport from outside the EU on an EU carrier (e.g. MEX->MAD on IB) -> Covered (€600).
+    - Arrives into an EU/EEA/CH airport from outside the EU on a non-EU carrier (e.g. MEX->CDG on AM) -> Not Covered (€0).
     """
     _, dist_km = haversine_distance(
         origin_airport.latitude,
@@ -265,9 +277,9 @@ def evaluate_eu261_segment(
 
 def simulate_flight_crediting(segments: list[FlightSegment]) -> list[CreditingSimulationResult]:
     """
-    Simulates crediting a list of paid flight segments across all loyalty programs in the
-    operating carrier's alliance, comparing 'Default to the Metal' against partner
-    'Smart Alliance Switch' programs.
+    Simulates crediting paid flight segments across all programs in the operating airline's alliance:
+    - For `CDG <-> MEX` on Aeroméxico (`AM`, SkyTeam): Compares `AM_RW`, `VS_FC`, and `AF_FB`.
+    - For `MEX <-> MAD` on Iberia (`IB`, Oneworld): Compares `IB_PLUS`, `BA_EC`, `AA_ADV`, and `AS_ATMOS`.
     """
     if not segments:
         raise ValueError("At least one FlightSegment is required.")
@@ -278,14 +290,11 @@ def simulate_flight_crediting(segments: list[FlightSegment]) -> list[CreditingSi
     for prog_code, program in LOYALTY_PROGRAMS.items():
         total_miles = 0
         total_status_pts = 0.0
-        own_metal_status_pts = 0.0
-        own_metal_segs = 0
         total_eligible_spend = 0.0
         total_gov_taxes = 0.0
         used_rev = False
         used_dist = False
         matched_any_rule = False
-        zero_earning_trap_classes: list[str] = []
 
         for seg in segments:
             orig = AIRPORTS[seg.origin_iata.upper()]
@@ -307,9 +316,6 @@ def simulate_flight_crediting(segments: list[FlightSegment]) -> list[CreditingSi
                 continue
 
             matched_any_rule = True
-            if rule.award_miles_pct == 0.0 and rule.status_miles_pct == 0.0:
-                zero_earning_trap_classes.append(f"{seg.operating_carrier.upper()} '{seg.booking_class.upper()}'")
-
             eligible_spend, gov_tax = estimate_eligible_spend(
                 orig,
                 dest,
@@ -322,28 +328,18 @@ def simulate_flight_crediting(segments: list[FlightSegment]) -> list[CreditingSi
             total_gov_taxes += gov_tax
 
             ticketing_carrier = (seg.ticketing_carrier or seg.operating_carrier).upper()
-            # Oneworld Transatlantic JV (IB, BA, AA): IB_PLUS, BA_EC, and AA_ADV all credit IB/BA/AA marketed tickets by spend!
-            oneworld_jv_revenue_group = {"IB", "BA", "AA"}
-            is_revenue_eligible_ticket = (
+            # Oneworld Transatlantic JV: IB_PLUS, BA_EC, and AA_ADV all credit IB-marketed flights by spend!
+            oneworld_jv_group = {"IB", "BA", "AA"}
+            is_revenue_eligible = (
                 ticketing_carrier == program.home_carrier_iata
-                or (prog_code in {"IB_PLUS", "BA_EC", "AA_ADV"} and ticketing_carrier in oneworld_jv_revenue_group)
+                or (prog_code in {"IB_PLUS", "BA_EC", "AA_ADV"} and ticketing_carrier in oneworld_jv_group)
             )
 
-            if is_revenue_eligible_ticket and eligible_spend > 0 and program.own_ticket_revenue_multiplier is not None:
+            if is_revenue_eligible and eligible_spend > 0 and program.own_ticket_revenue_multiplier is not None:
                 if prog_code in {"IB_PLUS", "BA_EC"} and seg.operating_carrier.upper() == "IB":
-                    # Official Iberia / BA Club Avios rule:
-                    # - Base (Blue) = 5 Avios per €1 EUR
-                    # - Spain <-> Mexico/LatAm marketed & operated by IB = +2 additional Avios per €1 EUR (= 7 Avios/€)
-                    # - MAD <-> BCN Air Shuttle = +1 additional Avios per €1 EUR (= 6 Avios/€)
+                    # Official IB & BA Club rule: 5 base Avios/€ + 2 additional Avios/€ on Spain<->Mexico (= 7 Avios/€)
                     eur_spend = eligible_spend / 1.08
-                    pair_set = {orig.iata_code, dest.iata_code}
-                    if "MAD" in pair_set and ("MEX" in pair_set or "CUN" in pair_set):
-                        avios_per_eur = 7.0
-                    elif pair_set == {"MAD", "BCN"}:
-                        avios_per_eur = 6.0
-                    else:
-                        avios_per_eur = 5.0
-                    seg_miles = int(round(eur_spend * avios_per_eur))
+                    seg_miles = int(round(eur_spend * 7.0))
                 else:
                     seg_miles = int(round(eligible_spend * program.own_ticket_revenue_multiplier))
                 used_rev = True
@@ -354,62 +350,46 @@ def simulate_flight_crediting(segments: list[FlightSegment]) -> list[CreditingSi
 
             total_miles += seg_miles
 
-            if prog_code == "BA_EC" and is_revenue_eligible_ticket and eligible_spend > 0:
-                # 2025/2026 The British Airways Club spend-based Tier Points:
-                # 1 Tier Point per £1 GBP ($1.27 USD) of eligible spend + fixed sector cabin bonus
+            if prog_code == "BA_EC" and is_revenue_eligible and eligible_spend > 0:
+                # 2025/2026 British Airways Club spend-based Tier Points (1 TP per £1 GBP + sector cabin bonus)
                 gbp_spend = eligible_spend / 1.27
-                cabin_sector_bonus = 400.0 if rule.cabin == CabinClass.BUSINESS else 175.0
-                seg_status = round(gbp_spend + (cabin_sector_bonus if is_intercontinental else 75.0), 1)
-            elif prog_code == "AA_ADV" and is_revenue_eligible_ticket and eligible_spend > 0:
-                # AAdvantage on IB/BA/AA marketed tickets: 5 Loyalty Points per $1 USD eligible spend
+                cabin_bonus = 400.0 if rule.cabin == CabinClass.BUSINESS else (275.0 if rule.cabin == CabinClass.PREMIUM_ECONOMY else 175.0)
+                seg_status = round(gbp_spend + cabin_bonus, 1)
+            elif prog_code == "AA_ADV" and is_revenue_eligible and eligible_spend > 0:
+                # AAdvantage on IB: 5 Loyalty Points per $1 USD eligible spend
                 seg_status = round(eligible_spend * 5.0, 1)
-            elif rule.status_calc_method in ("MM_ZONE_FIXED", "IB_ZONE_FIXED"):
+            elif prog_code == "AM_RW" and is_revenue_eligible and eligible_spend > 0:
+                # Aeromexico Rewards: 8 Qualifying Points per $1 USD eligible spend
+                seg_status = round(eligible_spend * 8.0, 1)
+            elif rule.status_calc_method == "IB_ZONE_FIXED":
                 seg_status = (
                     rule.intercontinental_status_points
                     if is_intercontinental
                     else rule.continental_status_points
                 )
-            elif rule.status_calc_method == "UA_PQP_PARTNER":
-                if is_revenue_eligible_ticket and eligible_spend > 0:
-                    seg_status = eligible_spend
-                else:
-                    divisor = 5.0 if seg.operating_carrier.upper() in UA_PREFERRED_PARTNERS else 6.0
-                    seg_status = round(min(seg_miles / divisor, 1500.0), 1)
             else:
                 seg_status = round(dist_mi * (rule.status_miles_pct / 100.0), 1)
 
             total_status_pts += seg_status
-            if seg.operating_carrier.upper() == program.home_carrier_iata:
-                own_metal_status_pts += seg_status
-                own_metal_segs += 1
 
         if not matched_any_rule:
             continue
 
         progress_pct = round(min(100.0, (total_status_pts / program.gold_status_threshold) * 100.0), 1)
-        warning: Optional[str] = None
-        if zero_earning_trap_classes:
-            trap_str = ", ".join(sorted(set(zero_earning_trap_classes)))
-            warning = f"⚠️ 0% Earning Trap: {trap_str} earns 0 miles and 0 status points in {program.program_name}!"
-        elif program.own_metal_min_share_pct > 0 and total_status_pts > 0:
-            share = (own_metal_status_pts / total_status_pts) * 100.0
-            if share < program.own_metal_min_share_pct:
-                warning = f"Requires {program.own_metal_min_share_pct:.0f}% status points on {program.home_carrier_iata} Group metal (currently {share:.1f}%)."
-        elif program.own_metal_min_segments > 0 and own_metal_segs < program.own_metal_min_segments:
-            warning = f"Requires {program.own_metal_min_segments} annual segments on {program.home_carrier_iata} metal (this itinerary has {own_metal_segs})."
 
         short_unlocks: list[str] = []
         long_progress: list[str] = []
         for bm in AWARD_SWEET_SPOTS:
             if bm.booking_program_code != prog_code:
                 continue
-            if bm.category == "SHORT_HAUL_UNLOCK" and total_miles >= bm.miles_required_one_way:
-                count = total_miles // bm.miles_required_one_way
-                rem = total_miles % bm.miles_required_one_way
-                short_unlocks.append(f"Unlocks {count}x {bm.description} ({bm.miles_required_one_way:,} + {rem:,} left)")
-            elif bm.category == "LONG_HAUL_SWEET_SPOT":
-                pct = round(min(100.0, (total_miles / bm.miles_required_one_way) * 100.0), 1)
-                long_progress.append(f"{pct}% toward {bm.description} ({bm.miles_required_one_way:,} required)")
+            if bm.category == "SHORT_HAUL_UNLOCK":
+                if total_miles >= bm.miles_required_one_way:
+                    count = total_miles // bm.miles_required_one_way
+                    rem = total_miles % bm.miles_required_one_way
+                    short_unlocks.append(f"✅ Unlocks {count}x {bm.description} ({bm.miles_required_one_way:,} req. + {rem:,} left)")
+                else:
+                    pct = round((total_miles / bm.miles_required_one_way) * 100.0, 1)
+                    short_unlocks.append(f"❌ 0 flights unlocked — Only {pct}% ({total_miles:,} / {bm.miles_required_one_way:,}) toward {bm.description}")
 
         basis = "HYBRID" if (used_rev and used_dist) else ("REVENUE_BASED" if used_rev else "DISTANCE_AND_ZONE_BASED")
 
@@ -426,11 +406,14 @@ def simulate_flight_crediting(segments: list[FlightSegment]) -> list[CreditingSi
                 status_points_earned=round(total_status_pts, 1),
                 gold_status_threshold=program.gold_status_threshold,
                 progress_to_gold_pct=progress_pct,
-                own_metal_warning=warning,
+                own_metal_warning=program.gold_status_tier_name,
                 unlocked_short_haul_awards=short_unlocks,
                 flagship_sweet_spot_progress=long_progress,
             )
         )
 
-    results.sort(key=lambda r: (r.progress_to_gold_pct, r.redeemable_miles_earned), reverse=True)
+    results.sort(
+        key=lambda r: (any(s.startswith("✅") for s in r.unlocked_short_haul_awards), r.redeemable_miles_earned, r.progress_to_gold_pct),
+        reverse=True,
+    )
     return results
