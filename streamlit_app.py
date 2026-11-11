@@ -18,7 +18,6 @@ from src.core.calculator import (
     apply_transfer_bonus,
     calculate_effective_cpm,
     calculate_required_bank_points,
-    estimate_eligible_spend,
     evaluate_eu261_segment,
     haversine_distance,
 )
@@ -45,7 +44,6 @@ from src.serverless import lambda_handler
 # Verified, Self-Contained Dataset (Zero Invented Partners or Fake Rules)
 # ===========================================================================
 MXN_PER_USD = 20.0
-EU_EEA_CH_CARRIERS = {"IB", "AF", "KL", "LH", "LX", "OS", "SN", "AY", "SK", "TP", "LO"}
 
 CLEAN_AIRPORTS: dict[str, AirportProfile] = {
     "MEX": AirportProfile("MEX", "Benito Juárez International (AICM)", "Mexico City", "MX", 19.4363, -99.0721, "NORTH_AMERICA", False, 65.0),
@@ -74,21 +72,17 @@ CLEAN_PROGRAMS: dict[str, LoyaltyProgram] = {
     "AS_ATMOS": LoyaltyProgram("AS_ATMOS", "Alaska Airlines Atmos Rewards", "AS", Alliance.ONEWORLD, "Atmos Points", None, True, "Atmos Gold (Oneworld Sapphire)", 40000.0),
 }
 
-# Strictly verified Mexican Credit Card transfer rules:
-# - Santander Unique Rewards -> Iberia Club ONLY (1 Unique Point = 1 Avios)
-# - BBVA Puntos -> Iberia Club (2.6 Puntos BBVA = 1 Avios, min 130 pts) & Aeroméxico (1.6 Puntos BBVA = 1 Pt AM)
-# - Amex México -> Iberia Club (1:1), British Airways (1:1), Flying Blue (1:1), Aeroméxico (1:1)
+# Verified Mexican Credit Card transfer rules:
 CLEAN_TRANSFER_RULES: list[TransferPartnerRule] = [
     TransferPartnerRule("SANTANDER_MX", "IB_PLUS", base_ratio=1.0, active_bonus_pct=0.0, min_transfer_increment=1000),
     TransferPartnerRule("BBVA_MX", "IB_PLUS", base_ratio=50.0 / 130.0, active_bonus_pct=0.0, min_transfer_increment=130),
-    TransferPartnerRule("BBVA_MX", "AM_RW",   base_ratio=0.625000, active_bonus_pct=0.0, min_transfer_increment=1000),
+    TransferPartnerRule("BBVA_MX", "AM_RW",   base_ratio=0.625, active_bonus_pct=0.0, min_transfer_increment=1000),
     TransferPartnerRule("AMEX_MX", "IB_PLUS", base_ratio=1.0, active_bonus_pct=0.0, min_transfer_increment=1000),
     TransferPartnerRule("AMEX_MX", "BA_EC",   base_ratio=1.0, active_bonus_pct=0.0, min_transfer_increment=1000),
     TransferPartnerRule("AMEX_MX", "AF_FB",   base_ratio=1.0, active_bonus_pct=0.0, min_transfer_increment=1000),
     TransferPartnerRule("AMEX_MX", "AM_RW",   base_ratio=1.0, active_bonus_pct=0.0, min_transfer_increment=1000),
 ]
 
-# Tab 2 Award Benchmarks on MEX -> MAD (Iberia 21k/40.5k Avios vs. Flying Blue vs. Aeroméxico)
 TAB2_MEX_MAD_BENCHMARKS: list[AwardSweetSpot] = [
     AwardSweetSpot("IB_MEX_MAD_ECON", "IB_PLUS", "IB", Alliance.ONEWORLD, "MEX", "MAD", CabinClass.ECONOMY, 21000, 115.0, 680.0, "LONG_HAUL_SWEET_SPOT", "Iberia Nonstop MEX→MAD Economy (21,000 Avios full, or less with Avios & Money; flexible changes/refunds)"),
     AwardSweetSpot("IB_MEX_MAD_BIZ", "IB_PLUS", "IB", Alliance.ONEWORLD, "MEX", "MAD", CabinClass.BUSINESS, 40500, 195.0, 2450.0, "LONG_HAUL_SWEET_SPOT", "Iberia Nonstop MEX→MAD Lie-Flat Business Class (40,500 Avios Off-Peak)"),
@@ -100,32 +94,63 @@ TAB2_MEX_MAD_BENCHMARKS: list[AwardSweetSpot] = [
     AwardSweetSpot("AM_MEX_MAD_BIZ", "AM_RW", "AM", Alliance.SKYTEAM, "MEX", "MAD", CabinClass.BUSINESS, 145000, 260.0, 2450.0, "LONG_HAUL_SWEET_SPOT", "Aeroméxico MEX→MAD Clase Premier via Aeroméxico Rewards (145,000 pts vs. 40,500 Avios on Iberia)"),
 ]
 
-# Tab 3 Immediate Flight Unlock Targets (What Earned Miles From Paid Flights Actually Unlock!)
-TAB3_UNLOCK_TARGETS: list[AwardSweetSpot] = [
-    # Aeroméxico Rewards: Lowest National Flight in Mexico = 10,000 Puntos AM!
-    AwardSweetSpot("AM_NATIONAL_10K", "AM_RW", "AM", Alliance.SKYTEAM, "MEX", "CUN", CabinClass.ECONOMY, 10000, 65.0, 150.0, "SHORT_HAUL_UNLOCK", "Lowest National Flight in Mexico on Aeroméxico (10,000 Puntos AM)"),
-    # Virgin Atlantic Flying Club:
-    # 1. Off-Peak Promo CUN->LHR Economy = 6,000 VS Points!
-    # 2. Off-Peak Promo CUN->LHR Premium Economy (W) = 10,000 VS Points!
-    # 3. MEX->Europe on Air France / KLM metal = 15,000 VS Points!
-    # 4. MEX->Europe on Aeroméxico metal (SkyTeam distance chart) = 25,000 VS Points
-    AwardSweetSpot("VS_CUN_LHR_6K_ECON", "VS_FC", "VS", Alliance.SKYTEAM, "CUN", "LHR", CabinClass.ECONOMY, 6000, 145.0, 620.0, "SHORT_HAUL_UNLOCK", "Off-Peak Promo CUN→LHR (Cancún to Europe!) Economy on Virgin Atlantic (6,000 VS Points)"),
-    AwardSweetSpot("VS_CUN_LHR_10K_W", "VS_FC", "VS", Alliance.SKYTEAM, "CUN", "LHR", CabinClass.PREMIUM_ECONOMY, 10000, 245.0, 1050.0, "SHORT_HAUL_UNLOCK", "Off-Peak Promo CUN→LHR (Cancún to Europe!) Premium Economy (W) on Virgin Atlantic (10,000 VS Points)"),
-    AwardSweetSpot("VS_AF_KL_15K_ECON", "VS_FC", "AF", Alliance.SKYTEAM, "MEX", "CDG", CabinClass.ECONOMY, 15000, 155.0, 720.0, "SHORT_HAUL_UNLOCK", "MEX→Europe Economy on Air France / KLM metal via Virgin Atlantic (15,000 VS Points)"),
-    AwardSweetSpot("VS_AM_25K_ECON", "VS_FC", "AM", Alliance.SKYTEAM, "CDG", "MEX", CabinClass.ECONOMY, 25000, 155.0, 720.0, "SHORT_HAUL_UNLOCK", "MEX↔Europe Economy on Aeroméxico metal via Virgin Atlantic SkyTeam chart (25,000 VS Points)"),
-    # Flying Blue:
-    AwardSweetSpot("AF_DOMESTIC_7500", "AF_FB", "AM", Alliance.SKYTEAM, "MEX", "CUN", CabinClass.ECONOMY, 7500, 65.0, 150.0, "SHORT_HAUL_UNLOCK", "Domestic Mexico Flight on Aeroméxico via Flying Blue (7,500 Miles)"),
-    # Alaska Airlines Atmos Rewards: 4,500-point and 7,000-point Oneworld reward flights!
-    AwardSweetSpot("AS_4500_REWARD", "AS_ATMOS", "AA", Alliance.ONEWORLD, "MAD", "BCN", CabinClass.ECONOMY, 4500, 28.0, 140.0, "SHORT_HAUL_UNLOCK", "Oneworld Short-Haul Reward Flight via Alaska Atmos (4,500 Atmos Points)"),
-    AwardSweetSpot("AS_7000_REWARD", "AS_ATMOS", "AA", Alliance.ONEWORLD, "MEX", "CUN", CabinClass.ECONOMY, 7000, 45.0, 210.0, "SHORT_HAUL_UNLOCK", "Oneworld Medium-Haul Reward Flight via Alaska Atmos (7,000 Atmos Points)"),
-    # Iberia / BA / AA lowest reward flights:
-    AwardSweetSpot("IB_4500_SHORTHAUL", "IB_PLUS", "IB", Alliance.ONEWORLD, "MAD", "BCN", CabinClass.ECONOMY, 4500, 28.0, 140.0, "SHORT_HAUL_UNLOCK", "European Short-Haul MAD–BCN Economy on Iberia (4,500 Avios)"),
-    AwardSweetSpot("BA_4750_SHORTHAUL", "BA_EC", "IB", Alliance.ONEWORLD, "MAD", "BCN", CabinClass.ECONOMY, 4750, 28.0, 140.0, "SHORT_HAUL_UNLOCK", "European Short-Haul MAD–BCN Economy via British Airways Avios (4,750 Avios)"),
-    AwardSweetSpot("AA_7500_SHORTHAUL", "AA_ADV", "AA", Alliance.ONEWORLD, "MEX", "CUN", CabinClass.ECONOMY, 7500, 45.0, 190.0, "SHORT_HAUL_UNLOCK", "Oneworld Short-Haul Reward Flight via AAdvantage (7,500 Miles)"),
-]
+# Separate, carrier-specific booking class menus for SkyTeam (Aeroméxico) vs. Oneworld (Iberia)
+SKYTEAM_AM_CLASSES: dict[str, dict[str, str]] = {
+    "K": {
+        "en": "K / L / Q — Economy Clásica (AM: Spend 8x/$1 | Virgin Atlantic: 75% Distance | Flying Blue: 50%)",
+        "es": "K / L / Q — Turista Clásica (AM: Por Gasto 8x/$1 | Virgin Atlantic: 75% Distancia | Flying Blue: 50%)",
+    },
+    "Y": {
+        "en": "Y / B / M — Economy Flexible (AM: Spend 8x/$1 | Virgin Atlantic: 150% Distance | Flying Blue: 100%)",
+        "es": "Y / B / M — Turista Flexible (AM: Por Gasto 8x/$1 | Virgin Atlantic: 150% Distancia | Flying Blue: 100%)",
+    },
+    "W": {
+        "en": "W — AM Plus / Premier Light (AM: Spend 8x/$1 | Virgin Atlantic: 150% Distance | Flying Blue: 100%)",
+        "es": "W — AM Plus / Premier Light (AM: Por Gasto 8x/$1 | Virgin Atlantic: 150% Distancia | Flying Blue: 100%)",
+    },
+    "I": {
+        "en": "I / D — Clase Premier Discount Business (AM: Spend 8x/$1 | Virgin Atlantic: 150% + 200 TP/leg)",
+        "es": "I / D — Clase Premier Descuento (AM: Por Gasto 8x/$1 | Virgin Atlantic: 150% + 200 TP/tramo)",
+    },
+    "J": {
+        "en": "J / C — Clase Premier Full Flex Business (AM: Spend 8x/$1 | Virgin Atlantic: 250% + 200 TP/leg)",
+        "es": "J / C — Clase Premier Flexible (AM: Por Gasto 8x/$1 | Virgin Atlantic: 250% + 200 TP/tramo)",
+    },
+    "V": {
+        "en": "V / N / R — Economy Básica Promo (AM: Spend 8x/$1 | Virgin Atlantic: 25% Distance)",
+        "es": "V / N / R — Turista Básica Promo (AM: Por Gasto 8x/$1 | Virgin Atlantic: 25% Distancia)",
+    },
+}
+
+ONEWORLD_IB_CLASSES: dict[str, dict[str, str]] = {
+    "K": {
+        "en": "K / L / S — Turista Óptima / Discount Economy (IB & BA: Spend 7 Avios/€ | Alaska Atmos: 50% Distance)",
+        "es": "K / L / S — Turista Óptima / Descuento (IB y BA: Por Gasto 7 Avios/€ | Alaska Atmos: 50% Distancia)",
+    },
+    "Y": {
+        "en": "Y / B / H — Turista Confort / Flex Economy (IB & BA: Spend 7 Avios/€ | Alaska Atmos: 100% Distance)",
+        "es": "Y / B / H — Turista Confort / Flexible (IB y BA: Por Gasto 7 Avios/€ | Alaska Atmos: 100% Distancia)",
+    },
+    "W": {
+        "en": "W / E / T — Turista Premium / Premium Economy (IB & BA: Spend 7 Avios/€ | Alaska Atmos: 100% Distance)",
+        "es": "W / E / T — Turista Premium (IB y BA: Por Gasto 7 Avios/€ | Alaska Atmos: 100% Distancia)",
+    },
+    "I": {
+        "en": "I / R — Business Óptima / Discount Business (IB & BA: Spend 7 Avios/€ | Alaska Atmos: 125% Distance)",
+        "es": "I / R — Business Óptima / Descuento (IB y BA: Por Gasto 7 Avios/€ | Alaska Atmos: 125% Distancia)",
+    },
+    "J": {
+        "en": "J / C / D — Business Flexible (IB & BA: Spend 7 Avios/€ | Alaska Atmos: 250% Distance)",
+        "es": "J / C / D — Business Flexible (IB y BA: Por Gasto 7 Avios/€ | Alaska Atmos: 250% Distancia)",
+    },
+    "V": {
+        "en": "O / Q / N — Turista Básica Deep-Discount (IB & BA: Spend 7 Avios/€ | Alaska Atmos: 25% Distance)",
+        "es": "O / Q / N — Turista Básica Promo (IB y BA: Por Gasto 7 Avios/€ | Alaska Atmos: 25% Distancia)",
+    },
+}
 
 CLEAN_EARNING_RULES: list[PartnerEarningRule] = [
-    # Route 1: Aeroméxico ("AM" — CDG <-> MEX)
+    # Route 1: Aeroméxico ("AM" — CDG <-> MEX, SkyTeam)
     PartnerEarningRule("AM_RW", "AM", "V", CabinClass.ECONOMY,          25.0, 250, "DISTANCE_PCT",  25.0),
     PartnerEarningRule("AM_RW", "AM", "K", CabinClass.ECONOMY,          75.0, 250, "DISTANCE_PCT",  75.0),
     PartnerEarningRule("AM_RW", "AM", "Y", CabinClass.ECONOMY,         100.0, 500, "DISTANCE_PCT", 100.0),
@@ -147,7 +172,7 @@ CLEAN_EARNING_RULES: list[PartnerEarningRule] = [
     PartnerEarningRule("AF_FB", "AM", "I", CabinClass.BUSINESS,        150.0, 500, "IB_ZONE_FIXED", 150.0, 15.0, 36.0),
     PartnerEarningRule("AF_FB", "AM", "J", CabinClass.BUSINESS,        200.0, 1000, "IB_ZONE_FIXED", 200.0, 15.0, 36.0),
 
-    # Route 2: Iberia ("IB" — MEX <-> MAD)
+    # Route 2: Iberia ("IB" — MEX <-> MAD, Oneworld)
     PartnerEarningRule("IB_PLUS", "IB", "V", CabinClass.ECONOMY,          25.0, 250, "IB_ZONE_FIXED",  25.0,  35.0, 150.0),
     PartnerEarningRule("IB_PLUS", "IB", "K", CabinClass.ECONOMY,          50.0, 250, "IB_ZONE_FIXED",  50.0,  35.0, 150.0),
     PartnerEarningRule("IB_PLUS", "IB", "Y", CabinClass.ECONOMY,         100.0, 500, "IB_ZONE_FIXED", 100.0,  75.0, 300.0),
@@ -178,20 +203,123 @@ CLEAN_EARNING_RULES: list[PartnerEarningRule] = [
 ]
 
 
-def _calculate_segment_spend_and_tax(orig: AirportProfile, total_price_usd: float) -> tuple[float, float, str]:
-    """
-    Strips strictly the departure airport's mandatory government tax:
-    - Departing MEX strips Mexican AICM TUA ($65 USD).
-    - Departing CDG strips French airport departure tax ($75 USD).
-    - Departing MAD strips Spanish AENA airport departure tax ($42 USD).
-    """
+def _calculate_segment_spend_and_tax(orig: AirportProfile, total_price_usd: float, is_es: bool = False) -> tuple[float, float, str]:
+    """Strips strictly the departure airport's mandatory government tax."""
     tax_usd = min(round(orig.estimated_gov_departure_tax_usd, 2), round(total_price_usd * 0.35, 2))
     eligible_usd = round(max(0.0, total_price_usd - tax_usd), 2)
     if orig.country_code == "MX":
-        tax_label = f"Mexican TUA ({orig.iata_code}: ${tax_usd:.0f} USD)"
+        tax_label = f"Mexican TUA ({orig.iata_code}: ${tax_usd:.0f} USD)" if not is_es else f"TUA Mexicana ({orig.iata_code}: ${tax_usd:.0f} USD)"
     else:
-        tax_label = f"EU Airport Departure Tax ({orig.iata_code}: ${tax_usd:.0f} USD)"
+        tax_label = f"EU Departure Tax ({orig.iata_code}: ${tax_usd:.0f} USD)" if not is_es else f"Impuesto Salida UE ({orig.iata_code}: ${tax_usd:.0f} USD)"
     return eligible_usd, tax_usd, tax_label
+
+
+def _format_program_unlock_summary(prog_code: str, total_miles: int, is_es: bool) -> tuple[bool, str, str]:
+    """
+    Returns `(unlocked_bool, concise_table_cell, detailed_card_explanation)` tailored to each program's
+    key benchmark so the output is crystal clear and never cluttered.
+    """
+    if prog_code == "AM_RW":
+        target = 10000
+        if total_miles >= target:
+            cnt = total_miles // target
+            rem = total_miles % target
+            short = f"✅ {cnt}x National Flight in Mexico (10,000 pts) + {rem:,} left" if not is_es else f"✅ {cnt}x Vuelo Nacional en México (10,000 pts) + {rem:,} sobrantes"
+            detail = f"Unlocks {cnt}x domestic flight in Mexico (10,000 Puntos AM each) with {rem:,} points left over." if not is_es else f"Desbloquea {cnt}x vuelo nacional en México (10,000 Puntos AM) con {rem:,} puntos sobrantes."
+            return True, short, detail
+        pct = round((total_miles / target) * 100.0, 1)
+        shortage = target - total_miles
+        short = f"❌ 0 Flights — Only {pct}% of 10,000-pt National Flight (-{shortage:,} pts short)" if not is_es else f"❌ 0 Vuelos — Solo {pct}% de un Vuelo Nacional de 10,000 pts (faltan {shortage:,} pts)"
+        detail = f"Does NOT even reach a single 10,000-point domestic flight in Mexico ({total_miles:,} / 10,000 pts = {pct}%)." if not is_es else f"Ni siquiera alcanza para un vuelo nacional de 10,000 puntos dentro de México ({total_miles:,} / 10,000 pts = {pct}%)."
+        return False, short, detail
+
+    if prog_code == "VS_FC":
+        if total_miles >= 15000:
+            cnt_6k = total_miles // 6000
+            short = f"✅ Unlocks 15k AF/KL Europe Flight OR 10k W / {cnt_6k}x 6k Promo CUN→LHR!" if not is_es else f"✅ ¡Desbloquea Vuelo 15k AF/KL a Europa O 10k W / {cnt_6k}x 6k CUN→LHR!"
+            detail = (
+                f"Immediately unlocks: (1) MEX→Europe on Air France/KLM metal (15,000 VS pts), OR (2) Cancún→London (CUN→LHR) in Premium W (10,000 VS pts), OR (3) {cnt_6k}x CUN→LHR Promo Economy flights (6,000 VS pts each)!"
+                if not is_es
+                else f"Desbloquea de inmediato: (1) MEX→Europa en Air France/KLM (15,000 VS pts), O (2) Cancún→Londres (CUN→LHR) en Premium W (10,000 VS pts), O (3) {cnt_6k}x vuelos CUN→LHR en Turista Promo (6,000 VS pts c/u)."
+            )
+            return True, short, detail
+        if total_miles >= 10000:
+            rem_w = total_miles - 10000
+            short = f"✅ Unlocks CUN→LHR in Premium (W) (10,000 pts) OR 1x Economy (6,000 pts)!" if not is_es else f"✅ ¡Desbloquea CUN→LHR en Premium (W) (10,000 pts) O Turista (6,000 pts)!"
+            detail = (
+                f"Immediately unlocks Cancún→London (CUN→LHR) in Premium Economy W (10,000 VS Points + {rem_w:,} left) OR Economy (6,000 VS Points + {total_miles - 6000:,} left)!"
+                if not is_es
+                else f"Desbloquea de inmediato Cancún→Londres (CUN→LHR) en Premium Economy W (10,000 VS Points + {rem_w:,} sobrantes) O en Turista (6,000 VS Points + {total_miles - 6000:,} sobrantes)."
+            )
+            return True, short, detail
+        if total_miles >= 6000:
+            rem = total_miles - 6000
+            pct_w = round((total_miles / 10000.0) * 100.0, 1)
+            short = f"✅ Unlocks 1x Promo CUN→LHR (Europe) Economy (6,000 pts + {rem:,} left) | {pct_w}% of 10k W" if not is_es else f"✅ ¡Desbloquea 1x Promo CUN→LHR (Europa) Turista (6,000 pts + {rem:,} sobrantes)!"
+            detail = (
+                f"Immediately unlocks 1x Off-Peak Promo Cancún→London (CUN→LHR) Economy flight to Europe (6,000 VS Points) with {rem:,} points left over (and reaches {pct_w}% of the 10,000-pt Premium W flight)!"
+                if not is_es
+                else f"¡Desbloquea de inmediato 1x vuelo Promo Cancún→Londres (CUN→LHR) en Turista a Europa (6,000 VS Points) con {rem:,} puntos sobrantes (y alcanza {pct_w}% del vuelo de 10,000 pts en Premium W)!"
+            )
+            return True, short, detail
+        pct = round((total_miles / 6000.0) * 100.0, 1)
+        short = f"❌ 0 Flights — {pct}% ({total_miles:,} / 6,000) toward Promo CUN→LHR Economy" if not is_es else f"❌ 0 Vuelos — {pct}% ({total_miles:,} / 6,000) hacia Promo CUN→LHR Turista"
+        detail = short
+        return False, short, detail
+
+    if prog_code == "AS_ATMOS":
+        if total_miles >= 7000:
+            cnt_45 = total_miles // 4500
+            rem_70 = total_miles - 7000
+            short = f"✅ Unlocks 7,000-pt Medium-Haul Flight (+{rem_w if False else rem_70:,} left) OR {cnt_45}x 4,500-pt Flights!" if not is_es else f"✅ ¡Desbloquea Vuelo de 7,000 pts (+{rem_70:,} sobrantes) O {cnt_45}x Vuelos de 4,500 pts!"
+            detail = (
+                f"Immediately unlocks a 7,000-point Oneworld reward flight (+{rem_70:,} pts left) OR {cnt_45}x 4,500-point short-haul reward flights!"
+                if not is_es
+                else f"Desbloquea de inmediato un vuelo premio Oneworld de 7,000 puntos (+{rem_70:,} sobrantes) O {cnt_45}x vuelos cortos de 4,500 puntos."
+            )
+            return True, short, detail
+        if total_miles >= 4500:
+            rem = total_miles - 4500
+            pct_7k = round((total_miles / 7000.0) * 100.0, 1)
+            short = f"✅ Unlocks 1x 4,500-pt Reward Flight (+{rem:,} left) | {pct_7k}% toward 7,000-pt Flight" if not is_es else f"✅ ¡Desbloquea 1x Vuelo Premio de 4,500 pts (+{rem:,} sobrantes) | {pct_7k}% de 7,000 pts!"
+            detail = (
+                f"Immediately unlocks 1x 4,500-point Oneworld reward flight with {rem:,} points left over (and reaches {pct_7k}% of a 7,000-point reward flight)!"
+                if not is_es
+                else f"¡Desbloquea de inmediato 1x vuelo premio Oneworld de 4,500 puntos con {rem:,} puntos sobrantes (y alcanza {pct_7k}% de un vuelo de 7,000 puntos)!"
+            )
+            return True, short, detail
+        pct = round((total_miles / 4500.0) * 100.0, 1)
+        short = f"❌ 0 Flights — {pct}% ({total_miles:,} / 4,500) toward 4,500-pt Reward Flight" if not is_es else f"❌ 0 Vuelos — {pct}% ({total_miles:,} / 4,500) hacia Vuelo de 4,500 pts"
+        return False, short, short
+
+    if prog_code in ("IB_PLUS", "BA_EC"):
+        target = 4500 if prog_code == "IB_PLUS" else 4750
+        if total_miles >= target:
+            cnt = total_miles // target
+            rem = total_miles % target
+            short = f"✅ Unlocks {cnt}x Short-Haul Flight ({target:,} Avios) + {rem:,} left" if not is_es else f"✅ Desbloquea {cnt}x Vuelo Corto ({target:,} Avios) + {rem:,} sobrantes"
+            return True, short, short
+        pct = round((total_miles / target) * 100.0, 1)
+        shortage = target - total_miles
+        short = f"❌ 0 Flights — Only {pct}% of {target:,}-Avios Short-Haul (-{shortage:,} Avios short)" if not is_es else f"❌ 0 Vuelos — Solo {pct}% de un Vuelo Corto de {target:,} Avios (faltan {shortage:,} Avios)"
+        detail = (
+            f"Because {CLEAN_PROGRAMS[prog_code].program_name} credits by spend (7 Avios/€), this cheap ticket only earns {total_miles:,} Avios — {shortage:,} Avios short of a {target:,}-Avios reward flight."
+            if not is_es
+            else f"Como {CLEAN_PROGRAMS[prog_code].program_name} acredita por gasto (7 Avios/€), este boleto económico solo da {total_miles:,} Avios — faltan {shortage:,} Avios para el vuelo más bajo de {target:,} Avios."
+        )
+        return False, short, detail
+
+    # AF_FB or AA_ADV (7,500 threshold)
+    target = 7500
+    if total_miles >= target:
+        cnt = total_miles // target
+        rem = total_miles % target
+        short = f"✅ Unlocks {cnt}x Short-Haul Reward Flight (7,500 mi) + {rem:,} left" if not is_es else f"✅ Desbloquea {cnt}x Vuelo Corto (7,500 mi) + {rem:,} sobrantes"
+        return True, short, short
+    pct = round((total_miles / target) * 100.0, 1)
+    shortage = target - total_miles
+    short = f"❌ 0 Flights — Only {pct}% of 7,500-mi Short-Haul (-{shortage:,} short)" if not is_es else f"❌ 0 Vuelos — Solo {pct}% de un Vuelo de 7,500 mi (faltan {shortage:,})"
+    return False, short, short
 
 
 def _run_mex_mad_transfers(
@@ -220,13 +348,13 @@ def _run_mex_mad_transfers(
             net_saved = round(max(0.0, cash_fare_usd - spot.taxes_and_yq_usd), 2)
 
             if rule.bank_code == "SANTANDER_MX":
-                ratio_desc = "1 Unique Point = 1 Avios (Iberia Club Exclusive Partner)" if not is_es else "1 Unique Point = 1 Avios (Socio Exclusivo Iberia Club)"
+                ratio_desc = "1 Unique Point = 1 Avios (Iberia Club Exclusive)" if not is_es else "1 Unique Point = 1 Avios (Exclusivo Iberia Club)"
             elif rule.bank_code == "BBVA_MX" and rule.program_code == "IB_PLUS":
                 ratio_desc = "2.6 Puntos BBVA = 1 Avios (min 130 pts)" if not is_es else "2.6 Puntos BBVA = 1 Avios (mín. 130 pts)"
             elif rule.bank_code == "BBVA_MX" and rule.program_code == "AM_RW":
                 ratio_desc = "1.6 Puntos BBVA = 1 Punto Aeroméxico" if not is_es else "1.6 Puntos BBVA = 1 Punto Aeroméxico"
             else:
-                ratio_desc = "1 : 1 Membership Rewards Transfer" if not is_es else "Transferencia 1 : 1 Membership Rewards"
+                ratio_desc = "1 : 1 Membership Rewards"
 
             if bonus_pct > 0:
                 ratio_desc += f" + {bonus_pct:.0f}% promo ({eff_ratio}:1)"
@@ -258,10 +386,10 @@ def _run_mex_mad_transfers(
 def _run_paid_flight_simulation(
     segments: list[FlightSegment],
     is_es: bool,
-) -> list[CreditingSimulationResult]:
+) -> list[dict[str, object]]:
     """Simulates paid flight crediting for CDG<->MEX on AM (SkyTeam) or MEX<->MAD on IB (Oneworld)."""
     primary_carrier = segments[0].operating_carrier.upper()
-    results: list[CreditingSimulationResult] = []
+    rows: list[dict[str, object]] = []
 
     for prog_code, program in CLEAN_PROGRAMS.items():
         total_miles = 0
@@ -269,7 +397,6 @@ def _run_paid_flight_simulation(
         total_eligible_spend = 0.0
         total_gov_taxes = 0.0
         used_rev = False
-        used_dist = False
         matched_any = False
 
         for seg in segments:
@@ -285,12 +412,11 @@ def _run_paid_flight_simulation(
                 continue
             matched_any = True
 
-            eligible_spend, gov_tax, _ = _calculate_segment_spend_and_tax(orig, float(seg.total_ticket_price_usd or 0.0))
+            eligible_spend, gov_tax, _ = _calculate_segment_spend_and_tax(orig, float(seg.total_ticket_price_usd or 0.0), is_es=is_es)
             total_eligible_spend += eligible_spend
             total_gov_taxes += gov_tax
 
             ticketing_carrier = (seg.ticketing_carrier or seg.operating_carrier).upper()
-            # Oneworld Transatlantic JV: IB_PLUS, BA_EC, and AA_ADV all credit IB-marketed flights by spend!
             is_revenue_eligible = (
                 ticketing_carrier == program.home_carrier_iata
                 or (prog_code in {"IB_PLUS", "BA_EC", "AA_ADV"} and ticketing_carrier in {"IB", "BA", "AA"})
@@ -298,7 +424,6 @@ def _run_paid_flight_simulation(
 
             if is_revenue_eligible and eligible_spend > 0 and program.own_ticket_revenue_multiplier is not None:
                 if prog_code in {"IB_PLUS", "BA_EC"} and seg.operating_carrier.upper() == "IB":
-                    # Official Iberia & British Airways Club rule: 5 base + 2 Spain-Mexico bonus = 7 Avios per €1 EUR
                     eur_spend = eligible_spend / 1.08
                     seg_miles = int(round(eur_spend * 7.0))
                 else:
@@ -307,7 +432,6 @@ def _run_paid_flight_simulation(
             else:
                 raw_miles = dist_mi * (rule.award_miles_pct / 100.0)
                 seg_miles = int(round(max(raw_miles, float(rule.min_award_miles)) if rule.award_miles_pct > 0 else 0.0))
-                used_dist = True
 
             total_miles += seg_miles
 
@@ -330,52 +454,37 @@ def _run_paid_flight_simulation(
             continue
 
         progress_pct = round(min(100.0, (total_status_pts / program.gold_status_threshold) * 100.0), 1)
-
-        # Evaluate against TAB3_UNLOCK_TARGETS
-        unlock_lines: list[str] = []
-        progress_lines: list[str] = []
-        for bm in TAB3_UNLOCK_TARGETS:
-            if bm.booking_program_code != prog_code:
-                continue
-            if total_miles >= bm.miles_required_one_way:
-                count = total_miles // bm.miles_required_one_way
-                rem = total_miles % bm.miles_required_one_way
-                if is_es:
-                    unlock_lines.append(f"✅ ¡Desbloquea {count}x {bm.description} ({bm.miles_required_one_way:,} req. + {rem:,} sobrantes)!")
-                else:
-                    unlock_lines.append(f"✅ Unlocks {count}x {bm.description} ({bm.miles_required_one_way:,} req. + {rem:,} left)!")
-            else:
-                pct = round((total_miles / bm.miles_required_one_way) * 100.0, 1)
-                if is_es:
-                    progress_lines.append(f"❌ 0 vuelos — Solo alcanza {pct}% ({total_miles:,} / {bm.miles_required_one_way:,}) para {bm.description}")
-                else:
-                    progress_lines.append(f"❌ 0 flights unlocked — Only {pct}% ({total_miles:,} / {bm.miles_required_one_way:,}) toward {bm.description}")
-
-        basis = "REVENUE_BASED (Spend)" if used_rev else "DISTANCE_BASED (Miles × %)"
-        results.append(
-            CreditingSimulationResult(
-                program_code=prog_code,
-                program_name=program.program_name,
-                alliance=program.alliance,
-                is_operating_metal_program=(program.home_carrier_iata == primary_carrier),
-                redeemable_miles_earned=total_miles,
-                calculation_basis=basis,
-                eligible_spend_usd=round(total_eligible_spend, 2),
-                estimated_gov_taxes_stripped_usd=round(total_gov_taxes, 2),
-                status_points_earned=round(total_status_pts, 1),
-                gold_status_threshold=program.gold_status_threshold,
-                progress_to_gold_pct=progress_pct,
-                own_metal_warning=program.gold_status_tier_name,
-                unlocked_short_haul_awards=unlock_lines,
-                flagship_sweet_spot_progress=progress_lines,
-            )
+        unlocked_ok, short_cell, detail_text = _format_program_unlock_summary(prog_code, total_miles, is_es=is_es)
+        basis_label = (
+            ("Spend-Based (Revenue)" if not is_es else "Por Gasto (Tarifa + YQ)")
+            if used_rev
+            else ("Distance-Based (Miles × %)" if not is_es else "Por Distancia (Millas × %)")
         )
 
-    results.sort(
-        key=lambda r: (len(r.unlocked_short_haul_awards) > 0, r.redeemable_miles_earned, r.progress_to_gold_pct),
-        reverse=True,
-    )
-    return results
+        rows.append(
+            {
+                "program_code": prog_code,
+                "program_name": program.program_name,
+                "currency_name": program.currency_name,
+                "alliance": program.alliance.value,
+                "is_own_metal": (program.home_carrier_iata == primary_carrier),
+                "is_distance_based": not used_rev,
+                "basis_label": basis_label,
+                "total_miles": total_miles,
+                "status_pts": round(total_status_pts, 1),
+                "status_threshold": program.gold_status_threshold,
+                "progress_pct": progress_pct,
+                "status_tier_name": program.gold_status_tier_name,
+                "eligible_spend_usd": round(total_eligible_spend, 2),
+                "gov_taxes_usd": round(total_gov_taxes, 2),
+                "unlocked_ok": unlocked_ok,
+                "short_cell": short_cell,
+                "detail_text": detail_text,
+            }
+        )
+
+    rows.sort(key=lambda r: (bool(r["unlocked_ok"]), int(r["total_miles"]), float(r["progress_pct"])), reverse=True)
+    return rows
 
 
 # ===========================================================================
@@ -420,46 +529,40 @@ col_m1, col_m2 = st.columns(2)
 with col_m1:
     if not is_es:
         st.info(
-            "**1️⃣ Reason #1 — Crediting Paid Flights to 'Own Metal' Is Often Not Optimal:**  \n"
+            "**1️⃣ Why Built — Crediting Paid Flights to 'Own Metal' Is Often Not Optimal:**  \n"
             "• **Aeroméxico (`CDG ↔ MEX`) vs. Virgin Atlantic:** The lowest domestic award flight inside Mexico on **Aeroméxico Rewards** costs **10,000 points**. "
-            "If you fly a discounted round-trip from Europe to Mexico (`CDG ↔ MEX`) on Aeroméxico and credit to Aeroméxico's own revenue-based program (`8 pts/$1 USD`), "
-            "you often earn **~6,080 points—not even enough for a single 10,000-point national flight in Mexico**! "
-            "Crediting that exact same flight to SkyTeam partner **Virgin Atlantic Flying Club** (distance-based) earns **8,572 to 17,145 Virgin Points**, "
-            "which immediately unlocks an **Off-Peak Promo flight from Cancún to London (`CUN → LHR` Europe) for just 6,000 Virgin Points in Economy (or 10,000 pts in Premium `W`)**!  \n"
-            "• **Iberia (`MEX ↔ MAD`) vs. Alaska Atmos:** Both **Iberia Club** and **British Airways Club** credit Iberia flights by spend (`7 Avios/€`), "
-            "so a cheap round-trip earns **~3,500 Avios** (`0` flights unlocked). Crediting that same Iberia flight to **Alaska Airlines Atmos Rewards** (distance-based) "
-            "earns **5,634+ points**, immediately unlocking a **4,500-point (or 7,000-point) Oneworld reward flight**!"
+            "Flying a discounted round-trip from Paris to Mexico (`CDG ↔ MEX`) and crediting to Aeroméxico's own spend-based program (`8 pts/$1 USD`) earns **~6,080 points—not even enough for a single 10,000-point domestic flight in Mexico**! "
+            "Crediting that same flight to SkyTeam partner **Virgin Atlantic Flying Club** (distance-based) earns **8,574 to 17,145 Virgin Points**, "
+            "immediately unlocking an **Off-Peak Promo flight from Cancún to London (`CUN → LHR` Europe) for just 6,000 Virgin Points in Economy (or 10,000 pts in Premium `W`)**!  \n"
+            "• **Iberia (`MEX ↔ MAD`) vs. Alaska Atmos:** Crediting a cheap Iberia round-trip to **Iberia Club** or **British Airways** (spend-based `7 Avios/€`) earns **~3,519 Avios** (`0` flights unlocked). "
+            "Crediting it to **Alaska Airlines Atmos Rewards** (distance-based) earns **5,634+ points**, immediately unlocking a **4,500-point (or 7,000-point) Oneworld reward flight**!"
         )
     else:
         st.info(
             "**1️⃣ Razón #1 — Acreditar un Vuelo Pagado a la Propia Aerolínea ('Own Metal') Casi Nunca Es Óptimo:**  \n"
             "• **Aeroméxico (`CDG ↔ MEX`) vs. Virgin Atlantic:** El vuelo premio nacional más bajo dentro de México en **Aeroméxico Rewards** cuesta **10,000 puntos**. "
-            "Si vuelas redondo de Europa a México (`CDG ↔ MEX`) en tarifa económica de Aeroméxico y acreditas en su propio programa por gasto (`8 pts/$1 USD`), "
-            "acumulas **~6,080 puntos—¡ni siquiera te alcanza para un vuelo nacional de 10,000 puntos en México!** "
-            "En cambio, si acreditas ese mismo vuelo de Aeroméxico en su socio SkyTeam **Virgin Atlantic Flying Club** (por distancia), ganas **8,572 a 17,145 Virgin Points**, "
-            "lo que desbloquea de inmediato un **vuelo promo de Cancún a Londres (`CUN → LHR` Europa) por solo 6,000 Virgin Points en Turista (o 10,000 pts en Premium `W`)**.  \n"
-            "• **Iberia (`MEX ↔ MAD`) vs. Alaska Atmos:** Tanto **Iberia Club** como **British Airways Club** acreditan vuelos de Iberia por gasto (`7 Avios/€`), "
-            "por lo que un boleto económico redondo da **~3,500 Avios** (`0` vuelos desbloqueados). Acreditarlo en **Alaska Airlines Atmos Rewards** (por distancia) "
-            "te da **5,634+ puntos**, ¡desbloqueando ya un **vuelo premio Oneworld de 4,500 o 7,000 puntos**!"
+            "Un vuelo redondo económico de París a México (`CDG ↔ MEX`) acreditado en Aeroméxico por gasto (`8 pts/$1 USD`) da **~6,080 puntos—¡ni siquiera alcanza para un vuelo nacional de 10,000 puntos en México!** "
+            "Acreditado en su socio SkyTeam **Virgin Atlantic Flying Club** (por distancia), da **8,574 a 17,145 Virgin Points**, "
+            "desbloqueando de inmediato un **vuelo promo de Cancún a Londres (`CUN → LHR` Europa) por solo 6,000 Virgin Points en Turista (o 10,000 pts en Premium `W`)**.  \n"
+            "• **Iberia (`MEX ↔ MAD`) vs. Alaska Atmos:** Un boleto económico en Iberia acreditado en **Iberia Club** o **British Airways** (por gasto `7 Avios/€`) da **~3,519 Avios** (`0` vuelos). "
+            "Acreditado en **Alaska Airlines Atmos Rewards** (por distancia) da **5,634+ puntos**, ¡desbloqueando ya un **vuelo premio Oneworld de 4,500 o 7,000 puntos**!"
         )
 
 with col_m2:
     if not is_es:
         st.success(
-            "**2️⃣ Reason #2 — Cardholders Don't Know the True Value of Their Mexican Bank Points (`Santander Unique`, `BBVA`, `Amex México` → `Iberia Avios`):**  \n"
-            "Most cardholders in Mexico redeem **Santander Unique Rewards** or **Puntos BBVA** for low-value store cashback without realizing their true purchasing power in **Iberia Club (Avios)**:  \n"
+            "**2️⃣ Why Built — Cardholders Don't Know the True Value of Their Mexican Bank Points (`Santander Unique`, `BBVA`, `Amex México` → `Iberia Avios`):**  \n"
             "• **Santander Unique Rewards:** Transfers **`1 : 1` (`1 Unique Point = 1 Avios`)** exclusively to **Iberia Club**.  \n"
-            "• **BBVA México (`Puntos BBVA`):** Transfers to **Iberia Club** (`2.6 Puntos BBVA = 1 Avios`, min 130 pts) and **Aeroméxico Rewards** (`1.6:1`).  \n"
+            "• **BBVA México (`Puntos BBVA`):** Transfers **`2.6 : 1`** to **Iberia Club** (min 130 pts) and **`1.6 : 1`** to **Aeroméxico Rewards**.  \n"
             "• **American Express México (`Membership Rewards`):** Transfers **`1 : 1`** to **Iberia Club**, **British Airways**, **Flying Blue**, and **Aeroméxico**.  \n"
-            "• **21,000 Avios to Europe + Maximum Flexibility:** For just **21,000 Avios** one-way, you can fly nonstop **Mexico City to Madrid (`MEX → MAD`)** paying only with Avios. "
+            "• **21,000 Avios to Europe + Full Flexibility:** For just **21,000 Avios** one-way, you can fly nonstop **Mexico City to Madrid (`MEX → MAD`)** paying only with Avios. "
             "You can even choose to pay **fewer Avios** using Iberia's **Avios & Money** slider, and **Avios tickets are far more flexible** than cheap cash tickets (easy date changes or refunds)."
         )
     else:
         st.success(
             "**2️⃣ Razón #2 — La Gente No Conoce el Valor Real de sus Puntos Bancarios en México (`Santander Unique`, `BBVA`, `Amex México` → `Iberia Avios`):**  \n"
-            "Muchos tarjetahabientes en México gastan sus puntos en comercios a un valor mínimo sin saber cuánto valen al transferirlos a **Iberia Club (Avios)**:  \n"
             "• **Santander Unique Rewards:** Transfiere **`1 : 1` (`1 Unique Point = 1 Avios`)** exclusivamente a **Iberia Club**.  \n"
-            "• **BBVA México (`Puntos BBVA`):** Transfiere a **Iberia Club** (`2.6 Puntos BBVA = 1 Avios`, mín. 130 pts) y a **Aeroméxico Rewards** (`1.6:1`).  \n"
+            "• **BBVA México (`Puntos BBVA`):** Transfiere **`2.6 : 1`** a **Iberia Club** (mín. 130 pts) y **`1.6 : 1`** a **Aeroméxico Rewards**.  \n"
             "• **American Express México (`Membership Rewards`):** Transfiere **`1 : 1`** a **Iberia Club**, **British Airways**, **Flying Blue** y **Aeroméxico**.  \n"
             "• **21,000 Avios a Europa + Máxima Flexibilidad:** Por solo **21,000 Avios** vuelas directo **Ciudad de México a Madrid (`MEX → MAD`)** pagando solo con Avios. "
             "Incluso puedes elegir usar **menos Avios** con **Avios & Money**, y los **boletos con Avios son mucho más flexibles** (permiten cambios y reembolsos)."
@@ -488,9 +591,9 @@ with st.sidebar:
             - **Amex México**: `1 : 1` → Iberia, BA, Flying Blue, Aeroméxico
 
             **2 Paid Flight Routes (Tab 3)**
-            - **`CDG ↔ MEX` on Aeroméxico (`AM`)**:
+            - **`CDG ↔ MEX` on Aeroméxico (`AM`, SkyTeam)**:
               - AM Rewards (`10k` national target) vs. Virgin Atlantic (`6k` Economy / `10k` W `CUN→LHR` promo)
-            - **`MEX ↔ MAD` on Iberia (`IB`)**:
+            - **`MEX ↔ MAD` on Iberia (`IB`, Oneworld)**:
               - Iberia & BA (`7 Avios/€` spend) vs. Alaska Atmos (`4.5k` & `7k` distance unlock)
             """
         )
@@ -515,7 +618,7 @@ with st.sidebar:
             """
         )
         st.divider()
-        st.markdown("### 🇲🇽 Alcance Verificado de la Demo")
+        st.markdown("### 🇲🇽 Alcance Verificado")
         st.markdown(
             """
             **3 Tarjetas en México (Pestaña 2)**
@@ -524,9 +627,9 @@ with st.sidebar:
             - **Amex México**: `1 : 1` → Iberia, BA, Flying Blue, Aeroméxico
 
             **2 Rutas de Vuelos Pagados (Pestaña 3)**
-            - **`CDG ↔ MEX` en Aeroméxico (`AM`)**:
+            - **`CDG ↔ MEX` en Aeroméxico (`AM`, SkyTeam)**:
               - AM Rewards (meta `10k` vuelo nacional) vs. Virgin Atlantic (`6k` Turista / `10k` W `CUN→LHR`)
-            - **`MEX ↔ MAD` en Iberia (`IB`)**:
+            - **`MEX ↔ MAD` en Iberia (`IB`, Oneworld)**:
               - Iberia y BA (`7 Avios/€` por gasto) vs. Alaska Atmos (`4.5k` y `7k` por distancia)
             """
         )
@@ -543,13 +646,13 @@ with st.sidebar:
         )
 
 # ---------------------------------------------------------------------------
-# Main Tabs
+# Main Navigation Tabs
 # ---------------------------------------------------------------------------
 tab1, tab2, tab3, tab4 = st.tabs(
     [
         "🗺️ 1. How It Works & Architectural Map" if not is_es else "🗺️ 1. Cómo Funciona y Mapa Arquitectónico",
         "💳 2. Mexican Cards → Europe (`Santander 1:1`, `BBVA`, `Amex`)" if not is_es else "💳 2. Tarjetas México → Europa (`Santander 1:1`, `BBVA`, `Amex`)",
-        "🛫 3. Flight Crediting (`CDG→MEX` on AM & `MEX→MAD` on IB)" if not is_es else "🛫 3. Acreditación de Vuelos (`CDG→MEX` en AM y `MEX→MAD` en IB)",
+        "🛫 3. Flight Crediting (`CDG↔MEX` on AM & `MEX↔MAD` on IB)" if not is_es else "🛫 3. Acreditación de Vuelos (`CDG↔MEX` en AM y `MEX↔MAD` en IB)",
         "🛠️ 4. Work-in-Progress Backend (`# TODO` Phase 2)" if not is_es else "🛠️ 4. Backend en Progreso (`# TODO` Fase 2)",
     ]
 )
@@ -736,7 +839,6 @@ with tab2:
 
     if pathways:
         winner = pathways[0]
-        worst = pathways[-1]
         scaled_avios = int(round(winner.award_miles_required * (avios_money_pct / 100.0)))
         scaled_bank_pts = int(round(winner.bank_points_required * (avios_money_pct / 100.0)))
         extra_copay = round((winner.award_miles_required - scaled_avios) * 0.0135, 0)
@@ -752,22 +854,20 @@ with tab2:
             f"{scaled_bank_pts if winner.bank_code != 'BBVA_MX' else int(round(scaled_avios / (1.0 + promo_bonus / 100.0))):,} pts",
             "1 Unique Point = 1 Avios",
         )
-        # Find BBVA -> Iberia row for metric card 3
         bbva_ib_row = next((p for p in pathways if p.bank_code == "BBVA_MX" and p.booking_program_code == "IB_PLUS"), None)
-        bbva_am_row = next((p for p in pathways if p.bank_code == "BBVA_MX" and p.booking_program_code == "AM_RW"), None)
         if bbva_ib_row:
             bbva_scaled = int(round(bbva_ib_row.bank_points_required * (avios_money_pct / 100.0)))
             k3.metric(
                 "Puntos BBVA → Iberia (2.6:1)" if not is_es else "Puntos BBVA → Iberia (2.6:1)",
                 f"{bbva_scaled:,} Puntos BBVA",
-                "vs. 120,000 Puntos BBVA on Aeroméxico!" if cabin_pick == CabinClass.ECONOMY else "vs. 232,000 Puntos BBVA on Aeroméxico!",
+                "vs. 120,000 BBVA on Aeroméxico" if cabin_pick == CabinClass.ECONOMY else "vs. 232,000 BBVA on Aeroméxico",
             )
         else:
             k3.metric("Taxes & TUA", f"${winner.taxes_and_yq_usd:.0f} USD", f"~${winner.taxes_and_yq_usd * MXN_PER_USD:,.0f} MXN")
 
         k4.metric(
             "Ticket Flexibility" if not is_es else "Flexibilidad del Boleto",
-            "Full Avios Flexibility" if not is_es else "Boleto Flexible Avios",
+            "Flexible Avios Ticket" if not is_es else "Boleto Flexible Avios",
             "Changes / Refunds (~€25)" if not is_es else "Cambios y Reembolso (~€25)",
         )
 
@@ -794,12 +894,12 @@ with tab2:
                         "Rank": f"#{idx}",
                         "Mexican Credit Card": p.bank_currency_name,
                         "Transfer To Program": f"{p.booking_program_name} ({p.booking_program_code})",
-                        "Operating Airline": p.operating_carrier_iata,
-                        "Award Miles / Avios Needed": f"{p.award_miles_required:,}",
-                        "Effective Ratio": f"{p.effective_transfer_ratio}:1",
+                        "Airline": p.operating_carrier_iata,
+                        "Award Miles / Avios": f"{p.award_miles_required:,}",
+                        "Ratio": f"{p.effective_transfer_ratio}:1",
                         "Bank Points Required": f"{p.bank_points_required:,} pts",
                         "Taxes & MEX TUA": f"${p.taxes_and_yq_usd:,.0f} USD (${p.taxes_and_yq_usd * MXN_PER_USD:,.0f} MXN)",
-                        "Value per Point": f"${val_mxn:.2f} MXN ({p.effective_cents_per_point:.2f}¢ USD)",
+                        "Value / Pt": f"${val_mxn:.2f} MXN ({p.effective_cents_per_point:.2f}¢ USD)",
                         "Transfer Rule & Flexibility": p.notes,
                     }
                 )
@@ -811,17 +911,17 @@ with tab2:
                         "Transferir a Programa": f"{p.booking_program_name} ({p.booking_program_code})",
                         "Aerolínea": p.operating_carrier_iata,
                         "Millas / Avios Req.": f"{p.award_miles_required:,}",
-                        "Tasa Efectiva": f"{p.effective_transfer_ratio}:1",
+                        "Tasa": f"{p.effective_transfer_ratio}:1",
                         "Puntos Bancarios Req.": f"{p.bank_points_required:,} pts",
                         "Impuestos y TUA MEX": f"${p.taxes_and_yq_usd:,.0f} USD (${p.taxes_and_yq_usd * MXN_PER_USD:,.0f} MXN)",
-                        "Valor por Punto": f"${val_mxn:.2f} MXN ({p.effective_cents_per_point:.2f}¢ USD)",
+                        "Valor / Pt": f"${val_mxn:.2f} MXN ({p.effective_cents_per_point:.2f}¢ USD)",
                         "Regla de Conversión y Flexibilidad": p.notes,
                     }
                 )
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
 # ===========================================================================
-# TAB 3: PAID FLIGHT CREDITING (STRICTLY CDG->MEX ON AM & MEX->MAD ON IB)
+# TAB 3: PAID FLIGHT CREDITING (DYNAMIC SKYTEAM vs ONEWORLD CLASS MENUS!)
 # ===========================================================================
 with tab3:
     st.subheader(
@@ -829,53 +929,41 @@ with tab3:
         if not is_es
         else "🛫 Simulador de Acreditación de Vuelos Pagados (`CDG ↔ MEX` en Aeroméxico y `MEX ↔ MAD` en Iberia)"
     )
-    st.caption(
-        "Demonstrates why crediting a cheap transatlantic flight to the operating airline ('Own Metal') fails to unlock even a basic short-haul ticket, whereas crediting to the right alliance partner immediately unlocks a reward flight."
-        if not is_es
-        else "Demuestra por qué acreditar un vuelo trasatlántico económico a la propia aerolínea ('Own Metal') ni siquiera alcanza para el boleto premio más bajo, mientras que acreditarlo al socio correcto de la alianza desbloquea un vuelo premio de inmediato."
-    )
 
-    r1, r2, r3 = st.columns(3)
+    r1, r2, r3 = st.columns([1.3, 1.5, 0.9])
     with r1:
         itinerary_choice = st.selectbox(
             "1. Select Route & Operating Airline" if not is_es else "1. Selecciona Ruta y Aerolínea Operadora",
             options=[
-                ("CDG", "MEX", "AM", "🇫🇷➡️🇲🇽 CDG ↔ MEX on Aeroméxico (AM — SkyTeam: AM 10k National vs. Virgin Atlantic 6k/10k W CUN→LHR!)" if not is_es else "🇫🇷➡️🇲🇽 CDG ↔ MEX en Aeroméxico (AM — SkyTeam: Meta 10k Nacional AM vs. Virgin Atlantic 6k/10k W CUN→LHR!)"),
-                ("MEX", "MAD", "IB", "🇲🇽➡️🇪🇸 MEX ↔ MAD on Iberia (IB — Oneworld: IB/BA Spend vs. Alaska Atmos 4,500 / 7,000-pt Unlock!)" if not is_es else "🇲🇽➡️🇪🇸 MEX ↔ MAD en Iberia (IB — Oneworld: IB/BA por Gasto vs. Alaska Atmos 4,500 / 7,000 pts!)"),
+                ("CDG", "MEX", "AM", "🇫🇷➡️🇲🇽 CDG ↔ MEX — Aeroméxico (SkyTeam)" if not is_es else "🇫🇷➡️🇲🇽 CDG ↔ MEX — Aeroméxico (SkyTeam)"),
+                ("MEX", "MAD", "IB", "🇲🇽➡️🇪🇸 MEX ↔ MAD — Iberia (Oneworld)" if not is_es else "🇲🇽➡️🇪🇸 MEX ↔ MAD — Iberia (Oneworld)"),
             ],
             format_func=lambda x: x[3],
         )
+
+    orig_c, dest_c, op_carrier, _ = itinerary_choice
+    active_class_dict = SKYTEAM_AM_CLASSES if op_carrier == "AM" else ONEWORLD_IB_CLASSES
+    lang_key = "es" if is_es else "en"
+
     with r2:
         b_class_choice = st.selectbox(
-            "2. Select Booking Class" if not is_es else "2. Selecciona Clase Tarifaria",
-            options=["K", "Y", "W", "I", "J", "V"],
-            format_func=lambda c: {
-                "K": ("K — Discounted Economy (75% on Virgin Atlantic / 50% on Alaska Atmos)" if not is_es else "K — Turista Descuento (75% en Virgin Atlantic / 50% en Alaska Atmos)"),
-                "Y": ("Y — Standard Economy (150% on Virgin Atlantic / 100% on Alaska Atmos)" if not is_es else "Y — Turista Estándar (150% en Virgin Atlantic / 100% en Alaska Atmos)"),
-                "W": ("W — Premium Economy / AM Plus (150% on Virgin Atlantic / 100% on Alaska Atmos)" if not is_es else "W — Premium Economy / AM Plus (150% en Virgin Atlantic / 100% en Alaska Atmos)"),
-                "I": ("I — Discounted Business / Clase Premier (150% on Virgin / 125% on Alaska)" if not is_es else "I — Ejecutiva / Clase Premier Descuento (150% en Virgin / 125% en Alaska)"),
-                "J": ("J — Full-Fare Business (250% on Virgin Atlantic & Alaska Atmos)" if not is_es else "J — Ejecutiva Flexible (250% en Virgin Atlantic y Alaska Atmos)"),
-                "V": ("V — Deep-Discount Economy (25% Distance)" if not is_es else "V — Turista Promo Básica (25% Distancia)"),
-            }[c],
-            index=0,  # Default to 'K' Discounted Economy!
+            (f"2. Select {('Aeroméxico (SkyTeam)' if op_carrier == 'AM' else 'Iberia (Oneworld)')} Fare Class" if not is_es else f"2. Selecciona Clase Tarifaria de {('Aeroméxico (SkyTeam)' if op_carrier == 'AM' else 'Iberia (Oneworld)')}"),
+            options=list(active_class_dict.keys()),
+            format_func=lambda c: active_class_dict[c][lang_key],
+            key=f"fare_class_{op_carrier}",  # Separate widget key per carrier so SkyTeam and Oneworld menus never bleed into each other!
         )
     with r3:
         trip_type = st.radio(
             "3. Itinerary Type" if not is_es else "3. Tipo de Viaje",
             options=["ROUND_TRIP", "ONE_WAY"],
-            format_func=lambda t: ("🔄 Round-Trip (2 Segments)" if not is_es else "🔄 Viaje Redondo (2 Tramos)") if t == "ROUND_TRIP" else ("➡️ One-Way (1 Segment)" if not is_es else "➡️ Sencillo (1 Tramo)"),
+            format_func=lambda t: ("🔄 Round-Trip" if not is_es else "🔄 Redondo") if t == "ROUND_TRIP" else ("➡️ One-Way" if not is_es else "➡️ Sencillo"),
             horizontal=True,
         )
 
-    orig_c, dest_c, op_carrier, _ = itinerary_choice
     is_rt = trip_type == "ROUND_TRIP"
-
-    # Default cheap transatlantic Economy fare so the contrast is immediately visible:
-    # - On CDG<->MEX (AM): $450/leg all-in ($900 RT) -> strips $75 CDG tax + $65 MEX TUA = $760 eligible spend -> 6,080 AM points (< 10,000 national flight!) vs 8,572 VS Points (unlocks 6,000-pt CUN->LHR!)
-    # - On MEX<->MAD (IB): $325/leg all-in ($650 RT) -> strips $65 MEX TUA + $42 MAD tax = $543 eligible spend -> 3,519 Avios on IB & BA (< 4,500 Avios!) vs 5,634 Atmos Points on Alaska (unlocks 4,500-pt flight!)
     default_leg_price = (450.0 if op_carrier == "AM" else 325.0) if b_class_choice in ("V", "K", "Y") else 1400.0
 
-    sp1, sp2 = st.columns([1, 2])
+    sp1, sp2 = st.columns([1.1, 1.9])
     with sp1:
         seg_all_in_usd = st.slider(
             ("4. All-In Ticket Price per One-Way Leg (USD)" if not is_es else "4. Precio Total con Impuestos por Tramo Sencillo (USD)"),
@@ -883,30 +971,35 @@ with tab3:
             max_value=4000.0,
             value=float(default_leg_price),
             step=25.0,
+            key=f"price_slider_{op_carrier}",
         )
 
     ap_orig = CLEAN_AIRPORTS[orig_c]
     ap_dest = CLEAN_AIRPORTS[dest_c]
-    elig_leg1, tax_leg1, tax_lbl1 = _calculate_segment_spend_and_tax(ap_orig, float(seg_all_in_usd))
-    elig_leg2, tax_leg2, tax_lbl2 = _calculate_segment_spend_and_tax(ap_dest, float(seg_all_in_usd))
+    elig_leg1, tax_leg1, tax_lbl1 = _calculate_segment_spend_and_tax(ap_orig, float(seg_all_in_usd), is_es=is_es)
+    elig_leg2, tax_leg2, tax_lbl2 = _calculate_segment_spend_and_tax(ap_dest, float(seg_all_in_usd), is_es=is_es)
 
     with sp2:
         if is_rt:
-            if not is_es:
-                st.info(
-                    f"🧾 **Accurate Per-Origin Departure Tax Breakdown (`{orig_c} ↔ {dest_c}`):**  \n"
-                    f"• **Leg 1 (`{orig_c} → {dest_c}`):** Strips **{tax_lbl1}** → Eligible `Base + YQ`: **${elig_leg1:,.2f} USD**  \n"
-                    f"• **Leg 2 (`{dest_c} → {orig_c}`):** Strips **{tax_lbl2}** → Eligible `Base + YQ`: **${elig_leg2:,.2f} USD**"
-                )
-            else:
-                st.info(
-                    f"🧾 **Desglose Exacto de Impuestos por Aeropuerto de Salida (`{orig_c} ↔ {dest_c}`):**  \n"
-                    f"• **Tramo 1 (`{orig_c} → {dest_c}`):** Descuenta **{tax_lbl1}** → `Base + YQ` Elegible: **${elig_leg1:,.2f} USD**  \n"
-                    f"• **Tramo 2 (`{dest_c} → {orig_c}`):** Descuenta **{tax_lbl2}** → `Base + YQ` Elegible: **${elig_leg2:,.2f} USD**"
-                )
+            st.markdown(
+                f"""
+                <div style="background:#F8FAFC;border:1px solid #CBD5E1;border-left:4px solid #0284C7;border-radius:8px;padding:10px 14px;font-size:13.5px;color:#0F172A;">
+                  <b>🧾 {"Per-Origin Departure Tax Breakdown" if not is_es else "Desglose de Impuestos por Aeropuerto de Salida"} (<code>{orig_c} ↔ {dest_c}</code>):</b><br/>
+                  • <b>Leg 1 (<code>{orig_c} → {dest_c}</code>):</b> -{tax_lbl1} → <b>${elig_leg1:,.2f} USD</b> {"eligible Base + YQ" if not is_es else "Base + YQ elegible"}<br/>
+                  • <b>Leg 2 (<code>{dest_c} → {orig_c}</code>):</b> -{tax_lbl2} → <b>${elig_leg2:,.2f} USD</b> {"eligible Base + YQ" if not is_es else "Base + YQ elegible"}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         else:
-            st.info(
-                f"🧾 **Departure Tax Stripped (`{orig_c} → {dest_c}`):** Strips **{tax_lbl1}** → Eligible `Base + YQ`: **${elig_leg1:,.2f} USD**"
+            st.markdown(
+                f"""
+                <div style="background:#F8FAFC;border:1px solid #CBD5E1;border-left:4px solid #0284C7;border-radius:8px;padding:12px 14px;font-size:13.5px;color:#0F172A;">
+                  <b>🧾 {"Departure Tax Breakdown" if not is_es else "Desglose de Impuesto de Salida"} (<code>{orig_c} → {dest_c}</code>):</b><br/>
+                  • -{tax_lbl1} → <b>${elig_leg1:,.2f} USD</b> {"eligible Base + YQ" if not is_es else "Base + YQ elegible"}
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 
     built_segments = [
@@ -922,9 +1015,10 @@ with tab3:
     eu_out = evaluate_eu261_segment(ap_orig, ap_dest, op_carrier)
     eu_ret = evaluate_eu261_segment(ap_dest, ap_orig, op_carrier) if is_rt else None
 
-    sim_rankings = _run_paid_flight_simulation(built_segments, is_es=is_es)
-    sample_prog = sim_rankings[0]
+    sim_rows = _run_paid_flight_simulation(built_segments, is_es=is_es)
+    sample_row = sim_rows[0]
 
+    # 4 Clean Metric Cards (Compact text so values never truncate with '...')
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
     m_col1.metric(
         "Total Great Circle Distance" if not is_es else "Distancia Total Gran Círculo",
@@ -932,85 +1026,116 @@ with tab3:
         f"{one_way_km * mult_legs:,.0f} km ({mult_legs} {'tramos' if is_es and is_rt else ('tramo' if is_es else ('legs' if is_rt else 'leg'))})",
     )
     m_col2.metric(
-        "Total Eligible Spend (Base + YQ)" if not is_es else "Gasto Elegible Total (Base + YQ)",
-        f"${sample_prog.eligible_spend_usd:,.2f} USD",
-        (f"Departure Taxes Stripped: ${sample_prog.estimated_gov_taxes_stripped_usd:,.2f}" if not is_es else f"Impuestos de Salida Descontados: ${sample_prog.estimated_gov_taxes_stripped_usd:,.2f}"),
+        "Eligible Spend (Base + YQ)" if not is_es else "Gasto Elegible (Base + YQ)",
+        f"${sample_row['eligible_spend_usd']:,.2f} USD",
+        f"-${sample_row['gov_taxes_usd']:,.2f} USD taxes stripped" if not is_es else f"-${sample_row['gov_taxes_usd']:,.2f} USD impuestos desc.",
     )
     m_col3.metric(
-        (f"Outbound EU261 ({orig_c}→{dest_c})" if not is_es else f"EU261 Ida ({orig_c}→{dest_c})"),
-        (f"€{eu_out['compensation_eur']} Protected" if not is_es else f"€{eu_out['compensation_eur']} Protegido") if eu_out["is_eligible"] else ("€0 (Not Covered)" if not is_es else "€0 (No Cubierto)"),
-        ("Departs EU Airport" if ap_orig.is_eu_eea_ch else f"Arrives EU on {op_carrier}"),
+        f"EU261 Leg 1 ({orig_c}→{dest_c})",
+        (f"€{eu_out['compensation_eur']} Protected" if not is_es else f"€{eu_out['compensation_eur']} Protegido") if eu_out["is_eligible"] else ("€0 Not Covered" if not is_es else "€0 No Cubierto"),
+        ("Departs EU Airport" if ap_orig.is_eu_eea_ch else f"EU Carrier ({op_carrier}) into EU"),
     )
     if is_rt and eu_ret:
         m_col4.metric(
-            (f"Return EU261 ({dest_c}→{orig_c})" if not is_es else f"EU261 Regreso ({dest_c}→{orig_c})"),
-            (f"€{eu_ret['compensation_eur']} Protected" if not is_es else f"€{eu_ret['compensation_eur']} Protegido") if eu_ret["is_eligible"] else ("€0 (Not Covered — Non-EU Carrier)" if not is_es else "€0 (No Cubierto — Aerolínea No-UE)"),
-            ("Departs EU Airport" if ap_dest.is_eu_eea_ch else f"Departs {dest_c} on {op_carrier}"),
+            f"EU261 Leg 2 ({dest_c}→{orig_c})",
+            (f"€{eu_ret['compensation_eur']} Protected" if not is_es else f"€{eu_ret['compensation_eur']} Protegido") if eu_ret["is_eligible"] else ("€0 Not Covered" if not is_es else "€0 No Cubierto"),
+            ("Departs EU Airport" if ap_dest.is_eu_eea_ch else f"Non-EU Origin & Carrier ({op_carrier})" if not is_es else f"Origen y Aerolínea No-UE ({op_carrier})"),
         )
     else:
         m_col4.metric(
-            "Alliance Evaluated" if not is_es else "Alianza Evaluada",
-            sample_prog.alliance.value,
-            sample_prog.own_metal_warning or "",
+            "Alliance" if not is_es else "Alianza",
+            str(sample_row["alliance"]),
+            str(sample_row["status_tier_name"]),
         )
 
-    metal_res = next((r for r in sim_rankings if r.is_operating_metal_program), None)
-    dist_partners = [r for r in sim_rankings if not r.is_operating_metal_program and "DISTANCE" in r.calculation_basis]
-    top_partner = dist_partners[0] if dist_partners else next((r for r in sim_rankings if not r.is_operating_metal_program), None)
+    # -----------------------------------------------------------------------
+    # Clean Side-by-Side Visual Verdict Cards (Own Metal vs. Smart Partner)
+    # -----------------------------------------------------------------------
+    metal_row = next((r for r in sim_rows if r["is_own_metal"]), None)
+    dist_partner_rows = [r for r in sim_rows if not r["is_own_metal"] and r["is_distance_based"]]
+    partner_row = dist_partner_rows[0] if dist_partner_rows else next((r for r in sim_rows if not r["is_own_metal"]), None)
 
-    if metal_res and top_partner:
-        metal_outcome = (
-            "; ".join(metal_res.unlocked_short_haul_awards)
-            if metal_res.unlocked_short_haul_awards
-            else ("; ".join(metal_res.flagship_sweet_spot_progress))
-        )
-        partner_outcome = (
-            "; ".join(top_partner.unlocked_short_haul_awards)
-            if top_partner.unlocked_short_haul_awards
-            else ("; ".join(top_partner.flagship_sweet_spot_progress))
-        )
-        if not is_es:
-            st.success(
-                f"🔀 **Own Metal (`{metal_res.program_name}`) vs. Smart Alliance Partner (`{top_partner.program_name}`):**  \n"
-                f"• **Crediting to Operating Airline ({metal_res.program_name} — `{metal_res.calculation_basis}`):** Earns **{metal_res.redeemable_miles_earned:,}** points "
-                f"({metal_res.progress_to_gold_pct}% toward **{metal_res.own_metal_warning}**) → **{metal_outcome}**  \n"
-                f"• **Smart Partner Switch ({top_partner.program_name} — `{top_partner.calculation_basis}`):** Earns **{top_partner.redeemable_miles_earned:,}** points "
-                f"({top_partner.progress_to_gold_pct}% toward **{top_partner.own_metal_warning}**) → **{partner_outcome}**"
+    if metal_row and partner_row:
+        card_left, card_right = st.columns(2)
+        with card_left:
+            m_bg = "#FEF2F2" if not metal_row["unlocked_ok"] else "#F0FDF4"
+            m_border = "#EF4444" if not metal_row["unlocked_ok"] else "#22C55E"
+            m_title_color = "#991B1B" if not metal_row["unlocked_ok"] else "#166534"
+            st.markdown(
+                f"""
+                <div style="background:{m_bg};border:1px solid {m_border};border-left:6px solid {m_border};border-radius:10px;padding:16px 18px;margin:8px 0;">
+                  <div style="font-size:12px;font-weight:700;text-transform:uppercase;color:{m_title_color};letter-spacing:0.5px;">
+                    🏠 {"Crediting to Operating Airline (Own Metal Default)" if not is_es else "Acreditar a la Propia Aerolínea (Opción por Defecto)"}
+                  </div>
+                  <div style="font-size:19px;font-weight:800;color:#0F172A;margin-top:4px;">
+                    {metal_row['program_name']} <span style="font-size:13px;font-weight:500;color:#475569;">({metal_row['basis_label']})</span>
+                  </div>
+                  <div style="font-size:24px;font-weight:800;color:{m_title_color};margin:8px 0;">
+                    {metal_row['total_miles']:,} {metal_row['currency_name']}
+                  </div>
+                  <div style="font-size:13.5px;color:#1E293B;margin-bottom:6px;">
+                    <b>{"Status Progress" if not is_es else "Progreso de Estatus"}:</b> {metal_row['progress_pct']}% → <code>{metal_row['status_tier_name']}</code>
+                  </div>
+                  <div style="font-size:13.5px;font-weight:600;color:{m_title_color};">
+                    {metal_row['detail_text']}
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-        else:
-            st.success(
-                f"🔀 **Propia Aerolínea (`{metal_res.program_name}`) vs. Socio Inteligente de Alianza (`{top_partner.program_name}`):**  \n"
-                f"• **Propia Aerolínea ({metal_res.program_name} — `{metal_res.calculation_basis}`):** Acumula **{metal_res.redeemable_miles_earned:,}** puntos "
-                f"({metal_res.progress_to_gold_pct}% hacia **{metal_res.own_metal_warning}**) → **{metal_outcome}**  \n"
-                f"• **Socio Inteligente ({top_partner.program_name} — `{top_partner.calculation_basis}`):** Acumula **{top_partner.redeemable_miles_earned:,}** puntos "
-                f"({top_partner.progress_to_gold_pct}% hacia **{top_partner.own_metal_warning}**) → **{partner_outcome}**"
+
+        with card_right:
+            p_bg = "#ECFDF5" if partner_row["unlocked_ok"] else "#FFFBEB"
+            p_border = "#10B981" if partner_row["unlocked_ok"] else "#F59E0B"
+            p_title_color = "#065F46" if partner_row["unlocked_ok"] else "#92400E"
+            st.markdown(
+                f"""
+                <div style="background:{p_bg};border:1px solid {p_border};border-left:6px solid {p_border};border-radius:10px;padding:16px 18px;margin:8px 0;">
+                  <div style="font-size:12px;font-weight:700;text-transform:uppercase;color:{p_title_color};letter-spacing:0.5px;">
+                    🚀 {"Smart Alliance Partner Switch (Distance-Based)" if not is_es else "Cambio Inteligente a Socio de Alianza (Por Distancia)"}
+                  </div>
+                  <div style="font-size:19px;font-weight:800;color:#0F172A;margin-top:4px;">
+                    {partner_row['program_name']} <span style="font-size:13px;font-weight:500;color:#475569;">({partner_row['basis_label']})</span>
+                  </div>
+                  <div style="font-size:24px;font-weight:800;color:{p_title_color};margin:8px 0;">
+                    {partner_row['total_miles']:,} {partner_row['currency_name']}
+                  </div>
+                  <div style="font-size:13.5px;color:#1E293B;margin-bottom:6px;">
+                    <b>{"Status Progress" if not is_es else "Progreso de Estatus"}:</b> {partner_row['progress_pct']}% → <code>{partner_row['status_tier_name']}</code>
+                  </div>
+                  <div style="font-size:13.5px;font-weight:600;color:{p_title_color};">
+                    {partner_row['detail_text']}
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 
+    # Clean, Scannable Comparison Table
     table_cred = []
-    for r in sim_rankings:
-        outcome_text = " | ".join(r.unlocked_short_haul_awards if r.unlocked_short_haul_awards else r.flagship_sweet_spot_progress)
+    for r in sim_rows:
         if not is_es:
             table_cred.append(
                 {
-                    "Loyalty Program": f"{r.program_name} ({r.program_code})",
-                    "Alliance": r.alliance.value,
-                    "Role": "🏠 Own Metal Default" if r.is_operating_metal_program else "🤝 Alliance Partner",
-                    "Calculation Basis": r.calculation_basis,
-                    "Points / Miles Earned": f"{r.redeemable_miles_earned:,}",
-                    "Alliance Status Tier & Progress": f"{r.progress_to_gold_pct}% toward {r.own_metal_warning} ({r.status_points_earned:,.0f} / {r.gold_status_threshold:,.0f})",
-                    "Immediate Reward Flights Unlocked": outcome_text,
+                    "Loyalty Program": f"{r['program_name']} ({r['program_code']})",
+                    "Alliance": r["alliance"],
+                    "Strategy Role": "🏠 Own Metal" if r["is_own_metal"] else "🤝 Alliance Partner",
+                    "Calculation Rule": r["basis_label"],
+                    "Points / Miles Earned": f"{r['total_miles']:,}",
+                    "Alliance Status Progress": f"{r['progress_pct']}% ({r['status_pts']:,.0f} / {r['status_threshold']:,.0f} → {r['status_tier_name']})",
+                    "Reward Flight Verdict": r["short_cell"],
                 }
             )
         else:
             table_cred.append(
                 {
-                    "Programa de Lealtad": f"{r.program_name} ({r.program_code})",
-                    "Alianza": r.alliance.value,
-                    "Rol": "🏠 Propia Aerolínea (Metal)" if r.is_operating_metal_program else "🤝 Socio de Alianza",
-                    "Base de Cálculo": r.calculation_basis,
-                    "Puntos / Millas Ganados": f"{r.redeemable_miles_earned:,}",
-                    "Nivel de Estatus en la Alianza": f"{r.progress_to_gold_pct}% hacia {r.own_metal_warning} ({r.status_points_earned:,.0f} / {r.gold_status_threshold:,.0f})",
-                    "Vuelos Premio Desbloqueados": outcome_text,
+                    "Programa de Lealtad": f"{r['program_name']} ({r['program_code']})",
+                    "Alianza": r["alliance"],
+                    "Rol": "🏠 Propia Aerolínea" if r["is_own_metal"] else "🤝 Socio de Alianza",
+                    "Regla de Cálculo": r["basis_label"],
+                    "Puntos / Millas Ganados": f"{r['total_miles']:,}",
+                    "Progreso de Estatus": f"{r['progress_pct']}% ({r['status_pts']:,.0f} / {r['status_threshold']:,.0f} → {r['status_tier_name']})",
+                    "Veredicto de Vuelos Premio": r["short_cell"],
                 }
             )
     st.dataframe(table_cred, use_container_width=True, hide_index=True)
