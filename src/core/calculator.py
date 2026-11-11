@@ -322,10 +322,30 @@ def simulate_flight_crediting(segments: list[FlightSegment]) -> list[CreditingSi
             total_gov_taxes += gov_tax
 
             ticketing_carrier = (seg.ticketing_carrier or seg.operating_carrier).upper()
-            is_own_ticket = ticketing_carrier == program.home_carrier_iata
+            # Oneworld Transatlantic JV (IB, BA, AA): IB_PLUS, BA_EC, and AA_ADV all credit IB/BA/AA marketed tickets by spend!
+            oneworld_jv_revenue_group = {"IB", "BA", "AA"}
+            is_revenue_eligible_ticket = (
+                ticketing_carrier == program.home_carrier_iata
+                or (prog_code in {"IB_PLUS", "BA_EC", "AA_ADV"} and ticketing_carrier in oneworld_jv_revenue_group)
+            )
 
-            if is_own_ticket and eligible_spend > 0 and program.own_ticket_revenue_multiplier is not None:
-                seg_miles = int(round(eligible_spend * program.own_ticket_revenue_multiplier))
+            if is_revenue_eligible_ticket and eligible_spend > 0 and program.own_ticket_revenue_multiplier is not None:
+                if prog_code in {"IB_PLUS", "BA_EC"} and seg.operating_carrier.upper() == "IB":
+                    # Official Iberia / BA Club Avios rule:
+                    # - Base (Blue) = 5 Avios per €1 EUR
+                    # - Spain <-> Mexico/LatAm marketed & operated by IB = +2 additional Avios per €1 EUR (= 7 Avios/€)
+                    # - MAD <-> BCN Air Shuttle = +1 additional Avios per €1 EUR (= 6 Avios/€)
+                    eur_spend = eligible_spend / 1.08
+                    pair_set = {orig.iata_code, dest.iata_code}
+                    if "MAD" in pair_set and ("MEX" in pair_set or "CUN" in pair_set):
+                        avios_per_eur = 7.0
+                    elif pair_set == {"MAD", "BCN"}:
+                        avios_per_eur = 6.0
+                    else:
+                        avios_per_eur = 5.0
+                    seg_miles = int(round(eur_spend * avios_per_eur))
+                else:
+                    seg_miles = int(round(eligible_spend * program.own_ticket_revenue_multiplier))
                 used_rev = True
             else:
                 raw_miles = dist_mi * (rule.award_miles_pct / 100.0)
@@ -334,14 +354,23 @@ def simulate_flight_crediting(segments: list[FlightSegment]) -> list[CreditingSi
 
             total_miles += seg_miles
 
-            if rule.status_calc_method in ("MM_ZONE_FIXED", "IB_ZONE_FIXED"):
+            if prog_code == "BA_EC" and is_revenue_eligible_ticket and eligible_spend > 0:
+                # 2025/2026 The British Airways Club spend-based Tier Points:
+                # 1 Tier Point per £1 GBP ($1.27 USD) of eligible spend + fixed sector cabin bonus
+                gbp_spend = eligible_spend / 1.27
+                cabin_sector_bonus = 400.0 if rule.cabin == CabinClass.BUSINESS else 175.0
+                seg_status = round(gbp_spend + (cabin_sector_bonus if is_intercontinental else 75.0), 1)
+            elif prog_code == "AA_ADV" and is_revenue_eligible_ticket and eligible_spend > 0:
+                # AAdvantage on IB/BA/AA marketed tickets: 5 Loyalty Points per $1 USD eligible spend
+                seg_status = round(eligible_spend * 5.0, 1)
+            elif rule.status_calc_method in ("MM_ZONE_FIXED", "IB_ZONE_FIXED"):
                 seg_status = (
                     rule.intercontinental_status_points
                     if is_intercontinental
                     else rule.continental_status_points
                 )
             elif rule.status_calc_method == "UA_PQP_PARTNER":
-                if is_own_ticket and eligible_spend > 0:
+                if is_revenue_eligible_ticket and eligible_spend > 0:
                     seg_status = eligible_spend
                 else:
                     divisor = 5.0 if seg.operating_carrier.upper() in UA_PREFERRED_PARTNERS else 6.0

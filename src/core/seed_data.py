@@ -115,15 +115,25 @@ LOYALTY_PROGRAMS: dict[str, LoyaltyProgram] = {
     ),
     "BA_EC": LoyaltyProgram(
         program_code="BA_EC",
-        program_name="British Airways Executive Club",
+        program_name="The British Airways Club (Avios)",
         home_carrier_iata="BA",
         alliance=Alliance.ONEWORLD,
         currency_name="Avios",
-        own_ticket_revenue_multiplier=6.0,
+        own_ticket_revenue_multiplier=6.4815,  # 7 Avios per €1 EUR (5 base + 2 LatAm/Mexico bonus) = 6.4815 Avios/$1 USD
         counts_yq_surcharge=True,
         gold_status_tier_name="Silver (Oneworld Sapphire)",
-        gold_status_threshold=600.0,
-        own_metal_min_segments=4,
+        gold_status_threshold=7500.0,  # 2025/2026 spend-based Tier Points threshold for Silver
+    ),
+    "AS_ATMOS": LoyaltyProgram(
+        program_code="AS_ATMOS",
+        program_name="Alaska Airlines Atmos Rewards",
+        home_carrier_iata="AS",
+        alliance=Alliance.ONEWORLD,
+        currency_name="Atmos Points",
+        own_ticket_revenue_multiplier=None,  # Distance-based on partner flights!
+        counts_yq_surcharge=True,
+        gold_status_tier_name="Atmos Gold (Oneworld Sapphire)",
+        gold_status_threshold=40000.0,
     ),
     "AA_ADV": LoyaltyProgram(
         program_code="AA_ADV",
@@ -447,7 +457,7 @@ AWARD_SWEET_SPOTS: list[AwardSweetSpot] = [
         taxes_and_yq_usd=155.0,
         typical_cash_fare_one_way_usd=680.0,
         category="LONG_HAUL_SWEET_SPOT",
-        description="SkyTeam Partner Economy to Europe via Virgin Atlantic Flying Club",
+        description="[Chart 3: SkyTeam Distance Chart] MEX-MAD Economy on AM/UX metal (25,000 VS Points)",
     ),
     AwardSweetSpot(
         benchmark_code="AM_MEX_CUN_ECON",
@@ -720,6 +730,12 @@ PARTNER_EARNING_RULES: list[PartnerEarningRule] = [
     PartnerEarningRule("AA_ADV", "IB", "P", CabinClass.BUSINESS, 125.0, 500, "DISTANCE_PCT", 125.0),
     PartnerEarningRule("AA_ADV", "IB", "I", CabinClass.BUSINESS, 125.0, 500, "DISTANCE_PCT", 125.0),
     PartnerEarningRule("AA_ADV", "IB", "J", CabinClass.BUSINESS, 250.0, 1000, "DISTANCE_PCT", 250.0),
+    # Credited to Alaska Airlines Atmos Rewards ("AS_ATMOS" — Distance-based Oneworld partner!)
+    PartnerEarningRule("AS_ATMOS", "IB", "K", CabinClass.ECONOMY,   50.0, 250, "DISTANCE_PCT",  50.0),
+    PartnerEarningRule("AS_ATMOS", "IB", "Y", CabinClass.ECONOMY,  100.0, 500, "DISTANCE_PCT", 100.0),
+    PartnerEarningRule("AS_ATMOS", "IB", "P", CabinClass.BUSINESS, 125.0, 500, "DISTANCE_PCT", 125.0),
+    PartnerEarningRule("AS_ATMOS", "IB", "I", CabinClass.BUSINESS, 125.0, 500, "DISTANCE_PCT", 125.0),
+    PartnerEarningRule("AS_ATMOS", "IB", "J", CabinClass.BUSINESS, 250.0, 1000, "DISTANCE_PCT", 250.0),
     # 4. Aeroméxico ("AM" — SkyTeam: Credited to Aeromexico Rewards vs. Virgin Atlantic Flying Club vs. Flying Blue)
     PartnerEarningRule("VS_FC", "AM", "K", CabinClass.ECONOMY,   50.0, 250, "IB_ZONE_FIXED",  50.0, 10.0,  25.0),
     PartnerEarningRule("VS_FC", "AM", "Y", CabinClass.ECONOMY,  100.0, 500, "IB_ZONE_FIXED", 100.0, 20.0,  50.0),
