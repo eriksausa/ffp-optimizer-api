@@ -39,9 +39,9 @@ ffp-optimizer-api/
 ## Core Math & Routing Overview (`src/core/`)
 
 ### 1. Transfer Bonus & Minimum Increment Rounding
-When transferring credit card points to an airline partner with a base ratio $R_{\text{base}}$ and promotional bonus $B_{\%}$:
+When transferring credit card points to an airline partner with a base ratio $R_{\text{base}}$ and promotional bonus $B_{p}$:
 
-$$R_{\text{eff}} = R_{\text{base}} \times \left(1 + \frac{B_{\%}}{100}\right)$$
+$$R_{\text{eff}} = R_{\text{base}} \times \left(1 + \frac{B_{p}}{100}\right)$$
 
 $$P_{\text{bank}} = \left\lceil \frac{M_{\text{award}}}{R_{\text{eff}} \times I_{\text{min}}} \right\rceil \times I_{\text{min}}$$
 
